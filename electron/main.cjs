@@ -10,6 +10,7 @@ const systemProxy = require('./lib/systemProxy.cjs');
 const { tcpPing } = require('./lib/pingTest.cjs');
 const { fetchText } = require('./lib/fetchText.cjs');
 const { JsonStore } = require('./lib/store.cjs');
+const { findFreePort } = require('./lib/freePort.cjs');
 
 const SOCKS_PORT = 10808;
 const HTTP_PORT = 10809;
@@ -115,10 +116,12 @@ async function connect(profileId) {
   sendState();
   const mode = store.get('connectionMode', 'proxy');
   try {
-    const config = buildXrayConfig(profile, { socksPort: SOCKS_PORT, httpPort: HTTP_PORT, mode });
+    const socksPort = await findFreePort(SOCKS_PORT);
+    const httpPort = await findFreePort(HTTP_PORT === socksPort ? HTTP_PORT + 1 : HTTP_PORT);
+    const config = buildXrayConfig(profile, { socksPort, httpPort, mode });
     await xray.start(config);
     if (mode === 'proxy') {
-      await systemProxy.enable('127.0.0.1', HTTP_PORT);
+      await systemProxy.enable('127.0.0.1', httpPort);
     }
     store.set('activeProfileId', profileId);
     store.set('activeMode', mode);
