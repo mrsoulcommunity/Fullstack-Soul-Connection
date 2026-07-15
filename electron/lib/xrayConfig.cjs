@@ -1,0 +1,158 @@
+'use strict';
+
+function streamSettings(p) {
+  const s = { network: p.network || 'tcp' };
+
+  if (p.security === 'tls' || p.security === 'reality') {
+    s.security = p.security;
+    if (p.security === 'tls') {
+      s.tlsSettings = {
+        serverName: p.sni || p.address,
+        allowInsecure: !!p.allowInsecure,
+        alpn: p.alpn ? p.alpn.split(',').filter(Boolean) : undefined,
+        fingerprint: p.fingerprint || undefined,
+      };
+    } else {
+      s.realitySettings = {
+        serverName: p.sni || p.address,
+        fingerprint: p.fingerprint || 'chrome',
+        publicKey: p.publicKey || '',
+        shortId: p.shortId || '',
+        spiderX: p.spiderX || '',
+      };
+    }
+  }
+
+  switch (p.network) {
+    case 'ws':
+      s.wsSettings = { path: p.path || '/', headers: p.host ? { Host: p.host } : {} };
+      break;
+    case 'grpc':
+      s.grpcSettings = { serviceName: p.serviceName || '', multiMode: p.mode === 'multi' };
+      break;
+    case 'h2':
+    case 'http':
+      s.httpSettings = { path: p.path || '/', host: p.host ? [p.host] : [] };
+      break;
+    case 'tcp':
+      if (p.headerType === 'http') {
+        s.tcpSettings = {
+          header: {
+            type: 'http',
+            request: { path: [p.path || '/'], headers: p.host ? { Host: [p.host] } : {} },
+          },
+        };
+      }
+      break;
+    case 'kcp':
+      s.kcpSettings = { header: { type: p.headerType || 'none' } };
+      break;
+  }
+  return s;
+}
+
+function buildOutbound(p) {
+  switch (p.protocol) {
+    case 'vmess':
+      return {
+        protocol: 'vmess',
+        settings: {
+          vnext: [{
+            address: p.address,
+            port: p.port,
+            users: [{ id: p.uuid, alterId: p.alterId || 0, security: p.scy || 'auto' }],
+          }],
+        },
+        streamSettings: streamSettings(p),
+      };
+    case 'vless':
+      return {
+        protocol: 'vless',
+        settings: {
+          vnext: [{
+            address: p.address,
+            port: p.port,
+            users: [{ id: p.uuid, encryption: p.encryption || 'none', flow: p.flow || undefined }],
+          }],
+        },
+        streamSettings: streamSettings(p),
+      };
+    case 'trojan':
+      return {
+        protocol: 'trojan',
+        settings: {
+          servers: [{ address: p.address, port: p.port, password: p.password }],
+        },
+        streamSettings: streamSettings(p),
+      };
+    case 'shadowsocks':
+      return {
+        protocol: 'shadowsocks',
+        settings: {
+          servers: [{ address: p.address, port: p.port, method: p.method, password: p.password }],
+        },
+        streamSettings: streamSettings({ ...p, security: 'none' }),
+      };
+    default:
+      throw new Error(`Unsupported protocol: ${p.protocol}`);
+  }
+}
+
+function buildXrayConfig(profile, opts = {}) {
+  const socksPort = opts.socksPort || 10808;
+  const httpPort = opts.httpPort || 10809;
+  const mode = opts.mode || 'proxy'; // 'proxy' | 'tun'
+
+  const inbounds = [
+    {
+      tag: 'socks-in',
+      listen: '127.0.0.1',
+      port: socksPort,
+      protocol: 'socks',
+      settings: { auth: 'noauth', udp: true },
+      sniffing: { enabled: true, destOverride: ['http', 'tls'] },
+    },
+    {
+      tag: 'http-in',
+      listen: '127.0.0.1',
+      port: httpPort,
+      protocol: 'http',
+      settings: {},
+      sniffing: { enabled: true, destOverride: ['http', 'tls'] },
+    },
+  ];
+
+  if (mode === 'tun') {
+    inbounds.push({
+      tag: 'tun-in',
+      protocol: 'tun',
+      settings: {
+        name: 'soulconnection-tun',
+        mtu: 1500,
+        gateway: ['10.90.90.1/24'],
+        dns: ['1.1.1.1'],
+        autoSystemRoutingTable: ['0.0.0.0/0'],
+        autoOutboundsInterface: 'auto',
+      },
+      sniffing: { enabled: true, destOverride: ['http', 'tls'] },
+    });
+  }
+
+  return {
+    log: { loglevel: opts.logLevel || 'warning' },
+    inbounds,
+    outbounds: [
+      { ...buildOutbound(profile), tag: 'proxy' },
+      { protocol: 'freedom', tag: 'direct', settings: {} },
+      { protocol: 'blackhole', tag: 'block', settings: {} },
+    ],
+    routing: {
+      domainStrategy: 'AsIs',
+      rules: [
+        { type: 'field', ip: ['geoip:private'], outboundTag: 'direct' },
+      ],
+    },
+  };
+}
+
+module.exports = { buildXrayConfig };
