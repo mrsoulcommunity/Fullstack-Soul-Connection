@@ -27,13 +27,19 @@ class XrayProcess extends EventEmitter {
       fs.writeFileSync(this.configPath, JSON.stringify(config, null, 2), 'utf8');
 
       this.logLines = [];
-      this.proc = spawn(this.xrayBinPath, ['run', '-c', this.configPath], {
+      const proc = spawn(this.xrayBinPath, ['run', '-c', this.configPath], {
         cwd: path.dirname(this.xrayBinPath),
         windowsHide: true,
       });
+      this.proc = proc;
+
+      // Guards against a stale/superseded process (one we've already moved on
+      // from via a later start() call) still emitting events for this session.
+      const isCurrent = () => this.proc === proc;
 
       let settled = false;
       const onData = (buf) => {
+        if (!isCurrent()) return;
         const text = buf.toString('utf8');
         this.logLines.push(text);
         if (this.logLines.length > 500) this.logLines.shift();
@@ -44,15 +50,17 @@ class XrayProcess extends EventEmitter {
         }
       };
 
-      this.proc.stdout.on('data', onData);
-      this.proc.stderr.on('data', onData);
+      proc.stdout.on('data', onData);
+      proc.stderr.on('data', onData);
 
-      this.proc.on('error', (err) => {
+      proc.on('error', (err) => {
+        if (!isCurrent()) return;
         if (!settled) { settled = true; reject(err); }
         this.emit('exit', -1);
       });
 
-      this.proc.on('exit', (code) => {
+      proc.on('exit', (code) => {
+        if (!isCurrent()) return;
         this.emit('exit', code);
         if (!settled) {
           settled = true;
@@ -71,12 +79,14 @@ class XrayProcess extends EventEmitter {
     return new Promise((resolve) => {
       if (!this.isRunning) return resolve();
       const proc = this.proc;
-      const onExit = () => resolve();
-      proc.once('exit', onExit);
+      const isAlive = () => proc.exitCode === null && !proc.killed;
+      let settled = false;
+      const finish = () => { if (!settled) { settled = true; resolve(); } };
+      proc.once('exit', finish);
       proc.kill();
       setTimeout(() => {
-        if (this.isRunning) proc.kill('SIGKILL');
-        resolve();
+        if (isAlive()) proc.kill('SIGKILL');
+        finish();
       }, 3000);
     });
   }
