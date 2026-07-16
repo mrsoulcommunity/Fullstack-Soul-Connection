@@ -1,4 +1,6 @@
 import React, { useMemo, useState } from 'react';
+import Icon from './Icon.jsx';
+import { formatBytes } from '../utils/format.js';
 
 function pingClass(ms) {
   if (ms === undefined) return 'na';
@@ -34,19 +36,24 @@ function ServerCard({ profile, active, ms, onSelect, onDelete, onPing }) {
       <span className="proto-tag">{profile.protocol}</span>
       <div className="info" onClick={() => onSelect(profile.id)}>
         <div className="name">{profile.name || profile.address}</div>
-        <div className="addr mono">{profile.address}:{profile.port}</div>
+        <div className="addr mono">
+          {profile.address}:{profile.port}
+          {profile.totalBytes > 0 && <span className="usage-tag"> · {formatBytes(profile.totalBytes)}</span>}
+        </div>
       </div>
       <button className={`ping ${pingClass(ms)}`} onClick={() => onPing(profile.id)}>
         {pingLabel(ms)}
       </button>
-      <button className="del" onClick={() => onDelete(profile.id)} title="حذف">✕</button>
+      <button className="del" onClick={() => onDelete(profile.id)} title="حذف">
+        <Icon name="close" size={13} />
+      </button>
     </div>
   );
 }
 
 export default function ServerList({
   profiles, subscriptions, activeProfileId, pings, updatingSubs,
-  onSelect, onDelete, onPing, onPingAll,
+  onSelect, onDelete, onPing, onPingAll, onAdd,
   onRefreshSubscription, onUpdateAllSubscriptions, onDeleteSubscription,
 }) {
   const [query, setQuery] = useState('');
@@ -75,9 +82,16 @@ export default function ServerList({
 
   if (!profiles.length) {
     return (
-      <div className="empty">
-        هنوز کانفیگی اضافه نکردی.<br />
-        با دکمه‌ی ＋ یک لینک vmess/vless/trojan/ss یا یک ساب‌اسکریپشن اضافه کن.
+      <div className="empty-state">
+        <div className="empty-glyph">
+          <Icon name="signal" size={30} strokeWidth={2.25} />
+        </div>
+        <h3>هنوز سروری وصل نکرده‌ای</h3>
+        <p>یک لینک کانفیگ یا آدرس ساب‌اسکریپشن اضافه کن تا اولین اتصالت رو بزنی.</p>
+        <button className="btn primary empty-cta" onClick={onAdd}>
+          <Icon name="plus" size={15} />
+          افزودن کانفیگ
+        </button>
       </div>
     );
   }
@@ -85,19 +99,22 @@ export default function ServerList({
   return (
     <div className="list-wrap">
       <div className="list-toolbar">
-        <input
-          className="search-input"
-          placeholder="جست‌وجو…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-        />
+        <div className="search-box">
+          <Icon name="search" size={14} className="search-icon" />
+          <input
+            className="search-input"
+            placeholder="جست‌وجو…"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
         <select className="sort-select" value={sortBy} onChange={(e) => setSortBy(e.target.value)}>
           <option value="default">پیش‌فرض</option>
           <option value="ping">پینگ</option>
           <option value="name">نام</option>
         </select>
         <button className="icon-btn" title="پینگ همه" onClick={() => onPingAll(filtered.map((p) => p.id))}>
-          ⟳
+          <Icon name="refresh" size={15} />
         </button>
       </div>
 
@@ -116,12 +133,18 @@ export default function ServerList({
                   className="group-toggle"
                   onClick={() => setCollapsed((c) => ({ ...c, [group.key]: !c[group.key] }))}
                 >
-                  <span className={`chev ${collapsed[group.key] ? 'closed' : ''}`}>▾</span>
+                  <span className={`chev ${collapsed[group.key] ? 'closed' : ''}`}>
+                    <Icon name="chevron" size={12} />
+                  </span>
                   <span className="group-name">{group.sub.name}</span>
                   <span className="group-meta mono">به‌روزرسانی: {relativeTime(group.sub.lastUpdated)}</span>
                 </button>
-                <button className="group-action" onClick={() => onRefreshSubscription(group.sub.id)} title="به‌روزرسانی">⟳</button>
-                <button className="group-action danger" onClick={() => onDeleteSubscription(group.sub.id)} title="حذف ساب‌اسکریپشن">✕</button>
+                <button className="group-action" onClick={() => onRefreshSubscription(group.sub.id)} title="به‌روزرسانی">
+                  <Icon name="refresh" size={13} />
+                </button>
+                <button className="group-action danger" onClick={() => onDeleteSubscription(group.sub.id)} title="حذف ساب‌اسکریپشن">
+                  <Icon name="close" size={13} />
+                </button>
               </div>
             )}
             {!collapsed[group.key] && group.items.map((p) => (

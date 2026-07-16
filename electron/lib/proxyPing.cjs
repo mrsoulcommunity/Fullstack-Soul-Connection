@@ -3,7 +3,7 @@ const http = require('http');
 
 // Measures real round-trip latency through the local HTTP proxy inbound,
 // i.e. the latency actually experienced by traffic going through the tunnel.
-function proxyPing(httpProxyPort, timeoutMs = 6000) {
+function proxyPing(httpProxyPort, timeoutMs = 12000) {
   return new Promise((resolve) => {
     const start = Date.now();
     let settled = false;

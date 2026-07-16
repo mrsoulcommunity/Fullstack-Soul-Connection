@@ -2,7 +2,8 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import ServerList from './components/ServerList.jsx';
 import AddModal from './components/AddModal.jsx';
 import ConnectHero from './components/ConnectHero.jsx';
-import SettingsModal from './components/SettingsModal.jsx';
+import SettingsView from './components/SettingsView.jsx';
+import Icon from './components/Icon.jsx';
 
 const PING_CONCURRENCY = 12;
 
@@ -27,10 +28,13 @@ export default function App() {
   const [connectionState, setConnectionState] = useState('disconnected');
   const [connectedAt, setConnectedAt] = useState(null);
   const [latencyMs, setLatencyMs] = useState(null);
+  const [traffic, setTraffic] = useState(null);
   const [settings, setSettings] = useState(null);
+  const [appInfo, setAppInfo] = useState(null);
+  const [updaterStatus, setUpdaterStatus] = useState(null);
   const [pings, setPings] = useState({});
   const [showAdd, setShowAdd] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
+  const [tab, setTab] = useState('servers');
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
   const [bestServerBusy, setBestServerBusy] = useState(false);
@@ -49,16 +53,23 @@ export default function App() {
 
   useEffect(() => {
     refresh();
+    window.soul.getAppInfo().then(setAppInfo).catch(() => {});
     const offState = window.soul.onStateChanged(({ connectionState, activeProfileId, connectedAt }) => {
       setConnectionState(connectionState);
       setActiveProfileId(activeProfileId);
       setConnectedAt(connectedAt);
-      if (connectionState !== 'connected') setLatencyMs(null);
+      if (connectionState !== 'connected') {
+        setLatencyMs(null);
+        setTraffic(null);
+        refresh(); // picks up the just-persisted lifetime usage total
+      }
     });
     const offLatency = window.soul.onLatencyUpdate(({ ms }) => setLatencyMs(ms));
+    const offTraffic = window.soul.onTrafficUpdate((data) => setTraffic(data));
     const offProfiles = window.soul.onProfilesChanged(() => refresh());
-    const offOpenSettings = window.soul.onOpenSettings(() => setShowSettings(true));
-    return () => { offState(); offLatency(); offProfiles(); offOpenSettings(); };
+    const offOpenSettings = window.soul.onOpenSettings(() => setTab('settings'));
+    const offUpdater = window.soul.onUpdaterStatus(setUpdaterStatus);
+    return () => { offState(); offLatency(); offTraffic(); offProfiles(); offOpenSettings(); offUpdater(); };
   }, [refresh]);
 
   function showToast(msg) {
@@ -214,6 +225,50 @@ export default function App() {
     }
   }
 
+  // Same as handleUpdateSettings but rethrows on failure so callers that need
+  // to react locally (e.g. reverting an optimistic input) can await it.
+  async function handleUpdateSettingsChecked(patch) {
+    try {
+      const updated = await window.soul.updateSettings(patch);
+      setSettings(updated);
+      return updated;
+    } catch (err) {
+      showToast(err.message || 'خطا در ذخیره تنظیمات');
+      throw err;
+    }
+  }
+
+  async function handleExportBackup() {
+    try {
+      const res = await window.soul.exportBackup();
+      if (!res.canceled) showToast('پشتیبان‌گیری با موفقیت انجام شد');
+    } catch (err) {
+      showToast(err.message || 'خطا در پشتیبان‌گیری');
+    }
+  }
+
+  async function handleImportBackup() {
+    try {
+      const res = await window.soul.importBackup();
+      if (!res.canceled) {
+        await refresh();
+        showToast(`${res.profiles} کانفیگ بازیابی شد`);
+      }
+    } catch (err) {
+      showToast(err.message || 'خطا در بازیابی');
+    }
+  }
+
+  async function handleResetUsage(id) {
+    const updated = await window.soul.resetUsage(id);
+    setProfiles(updated);
+  }
+
+  async function handleResetAllUsage() {
+    const updated = await window.soul.resetAllUsage();
+    setProfiles(updated);
+  }
+
   const activeProfile = profiles.find((p) => p.id === activeProfileId);
 
   return (
@@ -224,7 +279,6 @@ export default function App() {
           Soul Connection
           <small>کلاینت V2Ray / Xray</small>
         </div>
-        <button className="icon-btn no-drag" onClick={() => setShowSettings(true)} title="تنظیمات">⚙</button>
       </div>
 
       <ConnectHero
@@ -233,39 +287,81 @@ export default function App() {
         activeProfile={activeProfile}
         connectedAt={connectedAt}
         latencyMs={latencyMs}
+        traffic={traffic}
         onToggle={handleToggleConnect}
         onSetMode={handleSetMode}
       />
 
-      <div className="body">
-        <div className="section-head">
-          <h2>کانفیگ‌ها</h2>
-          <div className="head-actions">
-            <button
-              className="icon-btn"
-              onClick={handleBestServer}
-              disabled={bestServerBusy || !profiles.length}
-              title="بهترین سرور"
-            >
-              {bestServerBusy ? '…' : '⚡'}
-            </button>
-            <button className="icon-btn" onClick={() => setShowAdd(true)} title="افزودن">＋</button>
+      {tab === 'servers' ? (
+        <div className="body">
+          <div className="section-head">
+            <h2>کانفیگ‌ها</h2>
+            <div className="head-actions">
+              <button
+                className="icon-btn"
+                onClick={handleBestServer}
+                disabled={bestServerBusy || !profiles.length}
+                title="بهترین سرور"
+              >
+                <Icon name="bolt" size={15} />
+              </button>
+              <button className="icon-btn" onClick={() => setShowAdd(true)} title="افزودن">
+                <Icon name="plus" size={16} />
+              </button>
+            </div>
           </div>
+          <ServerList
+            profiles={profiles}
+            subscriptions={subscriptions}
+            activeProfileId={activeProfileId}
+            pings={pings}
+            updatingSubs={updatingSubs}
+            onSelect={handleSelect}
+            onDelete={handleDelete}
+            onPing={handlePing}
+            onPingAll={handlePingAll}
+            onAdd={() => setShowAdd(true)}
+            onRefreshSubscription={handleRefreshSubscription}
+            onUpdateAllSubscriptions={handleUpdateAllSubscriptions}
+            onDeleteSubscription={handleDeleteSubscription}
+          />
         </div>
-        <ServerList
-          profiles={profiles}
-          subscriptions={subscriptions}
-          activeProfileId={activeProfileId}
-          pings={pings}
-          updatingSubs={updatingSubs}
-          onSelect={handleSelect}
-          onDelete={handleDelete}
-          onPing={handlePing}
-          onPingAll={handlePingAll}
-          onRefreshSubscription={handleRefreshSubscription}
-          onUpdateAllSubscriptions={handleUpdateAllSubscriptions}
-          onDeleteSubscription={handleDeleteSubscription}
-        />
+      ) : (
+        <div className="body">
+          <div className="section-head">
+            <h2>تنظیمات</h2>
+          </div>
+          {settings && (
+            <SettingsView
+              settings={settings}
+              connectionState={connectionState}
+              profiles={profiles}
+              appInfo={appInfo}
+              updaterStatus={updaterStatus}
+              onCheckForUpdates={() => window.soul.checkForUpdates()}
+              onDownloadUpdate={() => window.soul.downloadUpdate()}
+              onInstallUpdate={() => window.soul.installUpdate()}
+              onUpdate={handleUpdateSettings}
+              onUpdateChecked={handleUpdateSettingsChecked}
+              onOpenLogsFolder={() => window.soul.openLogsFolder()}
+              onExportBackup={handleExportBackup}
+              onImportBackup={handleImportBackup}
+              onResetUsage={handleResetUsage}
+              onResetAllUsage={handleResetAllUsage}
+            />
+          )}
+        </div>
+      )}
+
+      <div className="tabbar no-drag">
+        <button className={`tabbar-btn ${tab === 'servers' ? 'active' : ''}`} onClick={() => setTab('servers')}>
+          <Icon name="signal" size={17} />
+          سرورها
+        </button>
+        <button className={`tabbar-btn ${tab === 'settings' ? 'active' : ''}`} onClick={() => setTab('settings')}>
+          <Icon name="settings" size={17} />
+          تنظیمات
+        </button>
       </div>
 
       {showAdd && (
@@ -273,15 +369,6 @@ export default function App() {
           onClose={() => setShowAdd(false)}
           onAddLink={handleAddLink}
           onAddSubscription={handleAddSubscription}
-        />
-      )}
-
-      {showSettings && settings && (
-        <SettingsModal
-          settings={settings}
-          onClose={() => setShowSettings(false)}
-          onUpdate={handleUpdateSettings}
-          onOpenLogsFolder={() => window.soul.openLogsFolder()}
         />
       )}
 

@@ -16,6 +16,14 @@ contextBridge.exposeInMainWorld('soul', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   updateSettings: (patch) => ipcRenderer.invoke('settings:update', patch),
   openLogsFolder: () => ipcRenderer.invoke('app:openLogsFolder'),
+  getAppInfo: () => ipcRenderer.invoke('app:getInfo'),
+  checkForUpdates: () => ipcRenderer.invoke('updater:check'),
+  downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+  installUpdate: () => ipcRenderer.invoke('updater:install'),
+  exportBackup: () => ipcRenderer.invoke('app:exportBackup'),
+  importBackup: () => ipcRenderer.invoke('app:importBackup'),
+  resetUsage: (id) => ipcRenderer.invoke('profiles:resetUsage', id),
+  resetAllUsage: () => ipcRenderer.invoke('profiles:resetAllUsage'),
 
   connect: (profileId) => ipcRenderer.invoke('connection:connect', profileId),
   disconnect: () => ipcRenderer.invoke('connection:disconnect'),
@@ -32,6 +40,11 @@ contextBridge.exposeInMainWorld('soul', {
     ipcRenderer.on('latency-update', handler);
     return () => ipcRenderer.removeListener('latency-update', handler);
   },
+  onTrafficUpdate: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('traffic-update', handler);
+    return () => ipcRenderer.removeListener('traffic-update', handler);
+  },
   onProfilesChanged: (callback) => {
     const handler = () => callback();
     ipcRenderer.on('profiles-changed', handler);
@@ -41,5 +54,10 @@ contextBridge.exposeInMainWorld('soul', {
     const handler = () => callback();
     ipcRenderer.on('open-settings', handler);
     return () => ipcRenderer.removeListener('open-settings', handler);
+  },
+  onUpdaterStatus: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('updater-status', handler);
+    return () => ipcRenderer.removeListener('updater-status', handler);
   },
 });

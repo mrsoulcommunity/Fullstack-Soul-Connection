@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notification, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
@@ -12,10 +12,15 @@ const { proxyPing } = require('./lib/proxyPing.cjs');
 const { fetchText } = require('./lib/fetchText.cjs');
 const { JsonStore } = require('./lib/store.cjs');
 const { findFreePort } = require('./lib/freePort.cjs');
+const { isElevated, relaunchElevated } = require('./lib/elevation.cjs');
+const { StatsClient } = require('./lib/statsApi.cjs');
+const { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } = require('./lib/updater.cjs');
 
 const SOCKS_PORT = 10808;
 const HTTP_PORT = 10809;
+const API_PORT = 10810;
 const LATENCY_POLL_MS = 15000;
+const TRAFFIC_POLL_MS = 1000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 
 const DEFAULT_SETTINGS = {
@@ -25,6 +30,9 @@ const DEFAULT_SETTINGS = {
   autoReconnect: true,
   subAutoUpdateInterval: 0, // ms; 0 = off
   xrayLogLevel: 'warning',
+  socksPort: SOCKS_PORT, // preferred; auto-bumped to the next free port if taken
+  httpPort: HTTP_PORT,
+  customBypass: '', // extra semicolon-separated hosts/patterns added to the system-proxy bypass list
 };
 
 const userDataDir = app.getPath('userData');
@@ -41,6 +49,7 @@ const xrayBin = app.isPackaged
 const xrayWorkDir = path.join(userDataDir, 'xray-run');
 
 const xray = new XrayProcess(xrayBin, xrayWorkDir);
+if (process.env.SC_DEBUG) xray.on('log', (l) => console.log('[xray]', l.trim()));
 
 let mainWindow = null;
 let tray = null;
@@ -49,9 +58,13 @@ let expectedExit = false;
 let reconnectAttempts = 0;
 let latencyTimer = null;
 let latencyPollInFlight = false;
+let trafficTimer = null;
+let trafficPollInFlight = false;
+let statsClient = null;
+let sessionTraffic = { uplink: 0, downlink: 0 };
 let subAutoUpdateTimer = null;
 let connectedAt = null;
-let currentPorts = null; // { socksPort, httpPort } of the live session
+let currentPorts = null; // { socksPort, httpPort, apiPort } of the live session
 
 // Serializes every external trigger of connect()/disconnect() (IPC, tray,
 // auto-reconnect, auto-connect-on-launch) so overlapping calls queue up
@@ -92,6 +105,7 @@ function sendState() {
   }
   updateTray();
   updateLatencyPolling();
+  updateTrafficPolling();
 }
 
 function updateTray() {
@@ -181,6 +195,67 @@ function updateLatencyPolling() {
   latencyTimer = setInterval(poll, LATENCY_POLL_MS);
 }
 
+function updateTrafficPolling() {
+  if (trafficTimer) { clearInterval(trafficTimer); trafficTimer = null; }
+  if (statsClient) { statsClient.close(); statsClient = null; }
+  if (connectionState !== 'connected' || !currentPorts || !currentPorts.apiPort) return;
+
+  const ports = currentPorts;
+  sessionTraffic = { uplink: 0, downlink: 0 };
+  let last = { uplink: 0, downlink: 0, time: Date.now() };
+
+  try {
+    statsClient = new StatsClient(ports.apiPort);
+  } catch {
+    return; // Stats are a nice-to-have; a failure here must not break the connection.
+  }
+
+  const poll = async () => {
+    if (trafficPollInFlight || currentPorts !== ports) return;
+    trafficPollInFlight = true;
+    try {
+      const { uplink, downlink } = await statsClient.queryOutboundTraffic('proxy');
+      const now = Date.now();
+      const elapsed = Math.max((now - last.time) / 1000, 0.001);
+      const uplinkSpeed = Math.max(0, (uplink - last.uplink) / elapsed);
+      const downlinkSpeed = Math.max(0, (downlink - last.downlink) / elapsed);
+      last = { uplink, downlink, time: now };
+      sessionTraffic = { uplink, downlink };
+
+      if (process.env.SC_DEBUG) console.log('[traffic]', uplink, downlink);
+      if (mainWindow && !mainWindow.isDestroyed() && connectionState === 'connected' && currentPorts === ports) {
+        const profile = findProfile(store.get('activeProfileId'));
+        const lifetimeBase = profile ? (profile.totalBytes || 0) : 0;
+        mainWindow.webContents.send('traffic-update', {
+          uplink, downlink, uplinkSpeed, downlinkSpeed,
+          sessionTotal: uplink + downlink,
+          lifetimeTotal: lifetimeBase + uplink + downlink,
+        });
+      }
+    } catch (err) {
+      // Transient gRPC hiccup -- skip this tick, try again next interval.
+      if (process.env.SC_DEBUG) console.error('[traffic] poll error:', err.message);
+    } finally {
+      trafficPollInFlight = false;
+    }
+  };
+  poll();
+  trafficTimer = setInterval(poll, TRAFFIC_POLL_MS);
+}
+
+function persistSessionTraffic() {
+  if (sessionTraffic.uplink === 0 && sessionTraffic.downlink === 0) return;
+  const profileId = store.get('activeProfileId');
+  if (!profileId) return;
+  const profiles = store.get('profiles', []);
+  const profile = profiles.find((p) => p.id === profileId);
+  if (profile) {
+    profile.totalBytes = (profile.totalBytes || 0) + sessionTraffic.uplink + sessionTraffic.downlink;
+    store.set('profiles', profiles);
+  }
+  sessionTraffic = { uplink: 0, downlink: 0 };
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 420,
@@ -241,17 +316,20 @@ async function connect(profileId) {
   connectionState = 'connecting';
   sendState();
   const mode = store.get('connectionMode', 'proxy');
+  const settings = getSettings();
   try {
-    const socksPort = await findFreePort(SOCKS_PORT);
-    const httpPort = await findFreePort(HTTP_PORT === socksPort ? HTTP_PORT + 1 : HTTP_PORT);
-    const config = buildXrayConfig(profile, { socksPort, httpPort, mode, logLevel: getSettings().xrayLogLevel });
+    const socksPort = await findFreePort(settings.socksPort);
+    const preferredHttp = settings.httpPort === socksPort ? settings.httpPort + 1 : settings.httpPort;
+    const httpPort = await findFreePort(preferredHttp);
+    const apiPort = await findFreePort(API_PORT === socksPort || API_PORT === httpPort ? httpPort + 1 : API_PORT);
+    const config = buildXrayConfig(profile, { socksPort, httpPort, apiPort, mode, logLevel: settings.xrayLogLevel });
     await xray.start(config);
     if (mode === 'proxy') {
-      await systemProxy.enable('127.0.0.1', httpPort);
+      await systemProxy.enable('127.0.0.1', httpPort, systemProxy.buildBypass(settings.customBypass));
     }
     store.set('activeProfileId', profileId);
     store.set('activeMode', mode);
-    currentPorts = { socksPort, httpPort };
+    currentPorts = { socksPort, httpPort, apiPort };
     connectedAt = Date.now();
     reconnectAttempts = 0;
     connectionState = 'connected';
@@ -282,6 +360,7 @@ async function disconnect() {
   expectedExit = true;
   await xray.stop();
   connectionState = 'disconnected';
+  persistSessionTraffic();
   currentPorts = null;
   connectedAt = null;
   sendState();
@@ -294,6 +373,7 @@ xray.on('exit', async () => {
   if (connectionState !== 'connected') return;
 
   connectionState = 'disconnected';
+  persistSessionTraffic();
   currentPorts = null;
   connectedAt = null;
   sendState();
@@ -319,8 +399,26 @@ xray.on('exit', async () => {
 });
 
 app.whenReady().then(async () => {
+  // If we're persisted in tunnel mode from a previous session but this launch
+  // isn't elevated, re-launch elevated before ever showing a window -- avoids
+  // a flash of a window that can't actually connect in tunnel mode.
+  const persistedMode = store.get('connectionMode', 'proxy');
+  if (persistedMode === 'tun' && !(await isElevated())) {
+    const relaunched = await relaunchElevated(app);
+    if (relaunched) return; // this instance is exiting; the elevated one takes over
+    // UAC prompt was declined or failed -- fall back to proxy mode instead of
+    // exiting with no window ever shown.
+    store.set('connectionMode', 'proxy');
+    notify('دسترسی مدیر رد شد', 'حالت تانل نیاز به دسترسی مدیر دارد. برنامه در حالت پروکسی سیستم باز شد.');
+  }
+
   createWindow();
   createTray();
+
+  initUpdater(mainWindow);
+  if (app.isPackaged) {
+    setTimeout(() => checkForUpdates().catch(() => {}), 5000);
+  }
 
   const settings = getSettings();
   app.setLoginItemSettings({ openAtLogin: !!settings.launchOnStartup });
@@ -329,7 +427,10 @@ app.whenReady().then(async () => {
   if (settings.autoConnect) {
     const profileId = store.get('activeProfileId');
     if (profileId && findProfile(profileId)) {
-      serialize(() => connect(profileId)).catch(() => {});
+      serialize(() => connect(profileId)).then(
+        () => { if (process.env.SC_DEBUG) console.log('[connect] resolved, state=', connectionState); },
+        (err) => { if (process.env.SC_DEBUG) console.error('[connect] rejected:', err); }
+      );
     }
   }
 
@@ -367,9 +468,19 @@ ipcMain.handle('profiles:list', () => ({
   settings: getSettings(),
 }));
 
-ipcMain.handle('settings:setMode', (_e, mode) => {
+ipcMain.handle('settings:setMode', async (_e, mode) => {
   if (mode !== 'proxy' && mode !== 'tun') throw new Error('حالت نامعتبر');
   if (connectionState !== 'disconnected') throw new Error('اول باید قطع اتصال کنی');
+
+  if (mode === 'tun' && !(await isElevated())) {
+    notify('اجرای مجدد با دسترسی مدیر', 'حالت تانل نیاز به دسترسی مدیر دارد. برنامه به‌زودی دوباره باز می‌شود…');
+    const relaunched = await relaunchElevated(app);
+    if (!relaunched) {
+      throw new Error('برای فعال‌سازی حالت تانل باید درخواست دسترسی مدیر (UAC) رو تایید کنی');
+    }
+    return mode; // unreachable in practice -- app.exit() fires inside relaunchElevated
+  }
+
   store.set('connectionMode', mode);
   return mode;
 });
@@ -513,6 +624,8 @@ ipcMain.handle('settings:get', () => getSettings());
 
 const LOG_LEVELS = new Set(['none', 'error', 'warning', 'info', 'debug']);
 const BOOLEAN_SETTINGS = new Set(['launchOnStartup', 'autoConnect', 'minimizeToTray', 'autoReconnect']);
+const PORT_SETTINGS = new Set(['socksPort', 'httpPort']);
+const isValidPort = (v) => typeof v === 'number' && Number.isInteger(v) && v >= 1024 && v <= 65535;
 
 ipcMain.handle('settings:update', (_e, patch) => {
   const allowed = new Set(Object.keys(DEFAULT_SETTINGS));
@@ -526,9 +639,21 @@ ipcMain.handle('settings:update', (_e, patch) => {
       if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) continue;
     } else if (key === 'xrayLogLevel') {
       if (!LOG_LEVELS.has(value)) continue;
+    } else if (PORT_SETTINGS.has(key)) {
+      if (!isValidPort(value)) continue;
+    } else if (key === 'customBypass') {
+      if (typeof value !== 'string' || value.length > 2000) continue;
     }
     clean[key] = value;
   }
+
+  if ('socksPort' in clean || 'httpPort' in clean) {
+    const prospective = { ...getSettings(), ...clean };
+    if (prospective.socksPort === prospective.httpPort) {
+      throw new Error('پورت SOCKS و HTTP باید متفاوت باشند');
+    }
+  }
+
   const settings = updateSettings(clean);
 
   if ('launchOnStartup' in clean) {
@@ -542,4 +667,78 @@ ipcMain.handle('settings:update', (_e, patch) => {
 
 ipcMain.handle('app:openLogsFolder', () => {
   shell.openPath(xrayWorkDir);
+});
+
+ipcMain.handle('app:getInfo', () => ({
+  version: app.getVersion(),
+  electron: process.versions.electron,
+}));
+
+ipcMain.handle('updater:check', () => checkForUpdates());
+ipcMain.handle('updater:download', () => downloadUpdate());
+ipcMain.handle('updater:install', () => quitAndInstall());
+
+ipcMain.handle('profiles:resetUsage', (_e, id) => {
+  const profiles = store.get('profiles', []);
+  const p = profiles.find((x) => x.id === id);
+  if (p) p.totalBytes = 0;
+  store.set('profiles', profiles);
+  return profiles;
+});
+
+ipcMain.handle('profiles:resetAllUsage', () => {
+  const profiles = store.get('profiles', []).map((p) => ({ ...p, totalBytes: 0 }));
+  store.set('profiles', profiles);
+  return profiles;
+});
+
+ipcMain.handle('app:exportBackup', async () => {
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'پشتیبان‌گیری از کانفیگ‌ها',
+    defaultPath: `soul-connection-backup-${new Date().toISOString().slice(0, 10)}.json`,
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+  });
+  if (canceled || !filePath) return { canceled: true };
+
+  const backup = {
+    version: 1,
+    exportedAt: Date.now(),
+    profiles: store.get('profiles', []),
+    subscriptions: store.get('subscriptions', []),
+    settings: getSettings(),
+  };
+  fs.writeFileSync(filePath, JSON.stringify(backup, null, 2), 'utf8');
+  return { canceled: false, filePath };
+});
+
+ipcMain.handle('app:importBackup', async () => {
+  if (connectionState !== 'disconnected') throw new Error('اول باید قطع اتصال کنی');
+
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    title: 'بازیابی کانفیگ‌ها',
+    filters: [{ name: 'JSON', extensions: ['json'] }],
+    properties: ['openFile'],
+  });
+  if (canceled || !filePaths.length) return { canceled: true };
+
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(filePaths[0], 'utf8'));
+  } catch {
+    throw new Error('فایل پشتیبان معتبر نیست');
+  }
+  if (!Array.isArray(data.profiles)) throw new Error('فایل پشتیبان معتبر نیست');
+
+  store.set('profiles', data.profiles);
+  store.set('subscriptions', Array.isArray(data.subscriptions) ? data.subscriptions : []);
+  if (data.settings && typeof data.settings === 'object') {
+    const allowedKeys = new Set(Object.keys(DEFAULT_SETTINGS));
+    const clean = {};
+    for (const key of Object.keys(data.settings)) {
+      if (allowedKeys.has(key)) clean[key] = data.settings[key];
+    }
+    updateSettings(clean);
+  }
+  store.set('activeProfileId', null);
+  return { canceled: false, profiles: data.profiles.length };
 });

@@ -10,7 +10,13 @@
     "build:ui": "vite build",
     "start": "npm run build:ui && electron .",
     "dev": "vite build && electron .",
-    "dist": "vite build && electron-builder"
+    "dist": "node scripts/build-exe.cjs",
+    "dist:publish": "node scripts/build-exe.cjs --publish"
+  },
+  "dependencies": {
+    "@grpc/grpc-js": "^1.12.2",
+    "@grpc/proto-loader": "^0.7.13",
+    "electron-updater": "^6.3.9"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
@@ -35,11 +41,18 @@
     ],
     "win": {
       "target": "nsis",
-      "requestedExecutionLevel": "requireAdministrator"
+      "requestedExecutionLevel": "asInvoker"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
-    }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "mrsoulcommunity",
+        "repo": "Fullstack-Soul-Connection"
+      }
+    ]
   }
 }

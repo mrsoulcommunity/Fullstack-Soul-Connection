@@ -138,21 +138,46 @@ function buildXrayConfig(profile, opts = {}) {
     });
   }
 
-  return {
+  const outbounds = [
+    { ...buildOutbound(profile), tag: 'proxy' },
+    { protocol: 'freedom', tag: 'direct', settings: {} },
+    { protocol: 'blackhole', tag: 'block', settings: {} },
+  ];
+
+  const routingRules = [
+    { type: 'field', ip: ['geoip:private'], outboundTag: 'direct' },
+  ];
+
+  const config = {
     log: { loglevel: opts.logLevel || 'warning' },
     inbounds,
-    outbounds: [
-      { ...buildOutbound(profile), tag: 'proxy' },
-      { protocol: 'freedom', tag: 'direct', settings: {} },
-      { protocol: 'blackhole', tag: 'block', settings: {} },
-    ],
+    outbounds,
     routing: {
       domainStrategy: 'AsIs',
-      rules: [
-        { type: 'field', ip: ['geoip:private'], outboundTag: 'direct' },
-      ],
+      rules: routingRules,
     },
   };
+
+  // Traffic stats: exposes a local gRPC StatsService that statsApi.cjs polls
+  // for live upload/download counters on the 'proxy' outbound.
+  if (opts.apiPort) {
+    config.api = { tag: 'api', services: ['StatsService'] };
+    config.stats = {};
+    config.policy = {
+      system: { statsOutboundUplink: true, statsOutboundDownlink: true },
+    };
+    inbounds.push({
+      tag: 'api-in',
+      listen: '127.0.0.1',
+      port: opts.apiPort,
+      protocol: 'dokodemo-door',
+      settings: { address: '127.0.0.1' },
+    });
+    outbounds.push({ tag: 'api', protocol: 'freedom', settings: {} });
+    routingRules.unshift({ type: 'field', inboundTag: ['api-in'], outboundTag: 'api' });
+  }
+
+  return config;
 }
 
 module.exports = { buildXrayConfig };

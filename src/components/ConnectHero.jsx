@@ -1,4 +1,6 @@
 import React, { useEffect, useState } from 'react';
+import Icon from './Icon.jsx';
+import { formatBytes, formatSpeed } from '../utils/format.js';
 
 const STATUS_TEXT = {
   disconnected: 'متصل نیستی',
@@ -31,7 +33,7 @@ function latencyTone(ms) {
   return 'bad';
 }
 
-export default function ConnectHero({ connectionState, connectionMode, activeProfile, connectedAt, latencyMs, onToggle, onSetMode }) {
+export default function ConnectHero({ connectionState, connectionMode, activeProfile, connectedAt, latencyMs, traffic, onToggle, onSetMode }) {
   const busy = connectionState === 'connecting' || connectionState === 'disconnecting';
   const modeLocked = connectionState !== 'disconnected';
   const [now, setNow] = useState(Date.now());
@@ -65,12 +67,27 @@ export default function ConnectHero({ connectionState, connectionMode, activePro
         )}
       </div>
       {connectionState === 'connected' && (
-        <div className="session-strip">
-          <span className={`latency-badge ${latencyTone(latencyMs)}`}>
-            {latencyMs == null ? 'در حال سنجش…' : latencyMs < 0 ? 'بدون پاسخ' : `${latencyMs}ms`}
-          </span>
-          {duration && <span className="duration-badge mono">{duration}</span>}
-        </div>
+        <>
+          <div className="session-strip">
+            <span className={`latency-badge ${latencyTone(latencyMs)}`}>
+              {latencyMs == null ? 'در حال سنجش…' : latencyMs < 0 ? 'بدون پاسخ' : `${latencyMs}ms`}
+            </span>
+            {duration && <span className="duration-badge mono">{duration}</span>}
+          </div>
+          {traffic && (
+            <div className="traffic-strip mono">
+              <span className="traffic-speed down">
+                <Icon name="arrowDown" size={12} />
+                {formatSpeed(traffic.downlinkSpeed)}
+              </span>
+              <span className="traffic-speed up">
+                <Icon name="arrowUp" size={12} />
+                {formatSpeed(traffic.uplinkSpeed)}
+              </span>
+              <span className="traffic-total">{formatBytes(traffic.sessionTotal)}</span>
+            </div>
+          )}
+        </>
       )}
       <div className="mode-switch">
         <button
