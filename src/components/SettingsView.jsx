@@ -47,12 +47,18 @@ function updaterStatusHint(updaterStatus) {
   }
 }
 
-function Section({ title, children }) {
+function Section({ title, icon, description, children }) {
   return (
-    <div className="settings-section">
-      <h4 className="settings-section-title">{title}</h4>
-      {children}
-    </div>
+    <section className="settings-card">
+      <header className="settings-card-head">
+        <span className="settings-card-icon"><Icon name={icon} size={16} /></span>
+        <div className="settings-card-heading">
+          <h4 className="settings-section-title">{title}</h4>
+          {description && <p className="settings-card-desc">{description}</p>}
+        </div>
+      </header>
+      <div className="settings-card-body">{children}</div>
+    </section>
   );
 }
 
@@ -149,7 +155,7 @@ export default function SettingsView({
 
   return (
     <div className="settings-view">
-      <Section title="اتصال">
+      <Section title="اتصال" icon="bolt" description="رفتار برنامه هنگام اجرا و اتصال">
         <Toggle
           label="اجرای خودکار با ویندوز"
           hint="Soul Connection هنگام ورود به ویندوز خودکار اجرا می‌شود"
@@ -176,7 +182,7 @@ export default function SettingsView({
         />
       </Section>
 
-      <Section title="شبکه">
+      <Section title="شبکه" icon="wifi" description="پورت‌های پروکسی و مسیرهای bypass">
         <PortField
           label="پورت SOCKS"
           value={settings.socksPort}
@@ -214,7 +220,7 @@ export default function SettingsView({
         />
       </Section>
 
-      <Section title="مصرف داده">
+      <Section title="مصرف داده" icon="database" description="میزان ترافیک مصرفی هر سرور">
         <div className="setting-row">
           <div className="setting-text">
             <span className="setting-label">مجموع مصرف همه‌ی سرورها</span>
@@ -242,7 +248,7 @@ export default function SettingsView({
         ))}
       </Section>
 
-      <Section title="پشتیبان‌گیری">
+      <Section title="پشتیبان‌گیری" icon="shield" description="ذخیره و بازیابی کانفیگ‌ها و تنظیمات">
         <div className="setting-row">
           <div className="setting-text">
             <span className="setting-label">خروجی گرفتن از کانفیگ‌ها</span>
@@ -265,7 +271,7 @@ export default function SettingsView({
         </div>
       </Section>
 
-      <Section title="پیشرفته">
+      <Section title="پیشرفته" icon="sliders" description="لاگ‌ها و تنظیمات فنی Xray">
         <div className="setting-row">
           <div className="setting-text">
             <span className="setting-label">سطح لاگ Xray</span>
@@ -291,7 +297,7 @@ export default function SettingsView({
         </div>
       </Section>
 
-      <Section title="درباره">
+      <Section title="درباره" icon="info" description="نسخه‌ی نصب‌شده و به‌روزرسانی">
         <div className="setting-row">
           <div className="setting-text">
             <span className="setting-label">Soul Connection</span>

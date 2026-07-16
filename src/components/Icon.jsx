@@ -15,6 +15,11 @@ const PATHS = {
   signal: 'M4 20v-3M9 20v-7M14 20v-11M19 20V4',
   arrowDown: 'M12 4v14M6 12l6 6 6-6',
   arrowUp: 'M12 20V6M6 12l6-6 6 6',
+  wifi: 'M5 12.55a11 11 0 0 1 14.08 0 M1.42 9a16 16 0 0 1 21.16 0 M8.53 16.11a6 6 0 0 1 6.95 0 M12 20h.01',
+  database: 'M3 5c0-1.66 4-3 9-3s9 1.34 9 3-4 3-9 3-9-1.34-9-3Z M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5 M3 12c0 1.66 4 3 9 3s9-1.34 9-3',
+  shield: 'M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z',
+  sliders: 'M4 21V14 M4 10V3 M12 21V12 M12 8V3 M20 21V16 M20 12V3 M1 14h6 M9 8h6 M17 16h6',
+  info: 'M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20Z M12 16v-4 M12 8h.01',
 };
 
 export default function Icon({ name, size = 16, strokeWidth = 2, className = '' }) {

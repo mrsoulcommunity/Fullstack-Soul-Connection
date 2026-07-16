@@ -274,7 +274,7 @@ export default function App() {
   return (
     <div className="app-shell">
       <div className="titlebar">
-        <div className="mark" />
+        <img className="mark" src="./icon.png" alt="" />
         <div className="name">
           Soul Connection
           <small>کلاینت V2Ray / Xray</small>

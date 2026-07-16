@@ -80,8 +80,8 @@ button {
   width: 22px;
   height: 22px;
   border-radius: 7px;
-  background: linear-gradient(135deg, var(--signal), var(--idle));
   flex-shrink: 0;
+  object-fit: contain;
 }
 
 .titlebar .name {
@@ -319,7 +319,7 @@ button {
   border-top-left-radius: var(--radius-lg);
   border-top-right-radius: var(--radius-lg);
   box-shadow: 0 -1px 0 var(--card-border);
-  padding: 18px 16px 16px;
+  padding: 18px 16px 10px;
   overflow: hidden;
 }
 
@@ -782,7 +782,56 @@ button {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px;
+}
+
+.settings-card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-md);
+  padding: 6px 14px 4px;
+  flex-shrink: 0;
+}
+
+.settings-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 0 8px;
+}
+
+.settings-card-icon {
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: rgba(45,217,185,0.1);
+  color: var(--signal);
+}
+
+.settings-card-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.settings-card-desc {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-faint);
+  line-height: 1.4;
+}
+
+.settings-card-body {
+  display: flex;
+  flex-direction: column;
 }
 
 .setting-row {
@@ -791,9 +840,11 @@ button {
   justify-content: space-between;
   gap: 12px;
   padding: 12px 0;
-  border-bottom: 1px solid var(--card-border);
+  border-top: 1px solid var(--card-border);
+  transition: background 0.12s;
 }
-.setting-row:last-of-type { border-bottom: none; }
+.settings-card-body .setting-row:first-child { border-top: none; }
+.settings-card-body .setting-row:hover { background: rgba(255,255,255,0.015); }
 
 .setting-row.column {
   flex-direction: column;
@@ -886,18 +937,12 @@ button {
 }
 .modal-head h3 { margin: 0; }
 
-.settings-section {
-  margin-top: 14px;
-}
-.settings-section:first-of-type { margin-top: 4px; }
-
 .settings-section-title {
-  margin: 0 0 2px;
-  font-size: 11px;
+  margin: 0;
+  font-size: 13px;
   font-weight: 700;
-  letter-spacing: 0.4px;
-  color: var(--text-faint);
-  text-transform: uppercase;
+  letter-spacing: 0.2px;
+  color: var(--text);
 }
 
 .setting-hint.error {

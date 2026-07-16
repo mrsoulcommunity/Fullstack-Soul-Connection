@@ -90,7 +90,7 @@ function updateSettings(patch) {
 function notify(title, body) {
   try {
     if (Notification.isSupported()) {
-      new Notification({ title, body }).show();
+      new Notification({ title, body, icon: APP_ICON_PATH }).show();
     }
   } catch { /* ignore */ }
 }
@@ -256,6 +256,8 @@ function persistSessionTraffic() {
   sessionTraffic = { uplink: 0, downlink: 0 };
 }
 
+const APP_ICON_PATH = path.join(__dirname, 'assets', 'icon.ico');
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 420,
@@ -264,6 +266,7 @@ function createWindow() {
     minHeight: 600,
     backgroundColor: '#0b0d12',
     autoHideMenuBar: true,
+    icon: APP_ICON_PATH,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -293,7 +296,7 @@ function createWindow() {
 }
 
 function createTray() {
-  const icon = nativeImage.createEmpty();
+  const icon = nativeImage.createFromPath(APP_ICON_PATH);
   try {
     tray = new Tray(icon);
     tray.setContextMenu(buildTrayMenu());
@@ -399,6 +402,8 @@ xray.on('exit', async () => {
 });
 
 app.whenReady().then(async () => {
+  app.setAppUserModelId('com.kasra.soulconnection');
+
   // If we're persisted in tunnel mode from a previous session but this launch
   // isn't elevated, re-launch elevated before ever showing a window -- avoids
   // a flash of a window that can't actually connect in tunnel mode.
