@@ -2,6 +2,16 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('soul', {
+  windowMinimize: () => ipcRenderer.invoke('window:minimize'),
+  windowToggleMaximize: () => ipcRenderer.invoke('window:toggleMaximize'),
+  windowClose: () => ipcRenderer.invoke('window:close'),
+  windowIsMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  onWindowState: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('window-state', handler);
+    return () => ipcRenderer.removeListener('window-state', handler);
+  },
+
   listProfiles: () => ipcRenderer.invoke('profiles:list'),
   addLink: (link) => ipcRenderer.invoke('profiles:addLink', link),
   deleteProfile: (id) => ipcRenderer.invoke('profiles:delete', id),
@@ -29,6 +39,17 @@ contextBridge.exposeInMainWorld('soul', {
   disconnect: () => ipcRenderer.invoke('connection:disconnect'),
   status: () => ipcRenderer.invoke('connection:status'),
   pingTest: (profileId) => ipcRenderer.invoke('ping:test', profileId),
+
+  testPing: (profileId, token) => ipcRenderer.invoke('test:ping', { profileId, token }),
+  testReal: (profileId, token) => ipcRenderer.invoke('test:real', { profileId, token }),
+  testSpeed: (profileId, token) => ipcRenderer.invoke('test:speed', { profileId, token }),
+  testCancel: (token) => ipcRenderer.invoke('test:cancel', token),
+  setFavorite: (id, favorite) => ipcRenderer.invoke('profiles:setFavorite', { id, favorite }),
+  onTestEvent: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('test-event', handler);
+    return () => ipcRenderer.removeListener('test-event', handler);
+  },
 
   onStateChanged: (callback) => {
     const handler = (_e, payload) => callback(payload);

@@ -1,6 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import Icon from './Icon.jsx';
-import { formatBytes, formatSpeed } from '../utils/format.js';
 
 const STATUS_TEXT = {
   disconnected: 'متصل نیستی',
@@ -16,80 +15,46 @@ const LABELS = {
   disconnecting: 'در حال قطع…',
 };
 
-function formatDuration(ms) {
-  const total = Math.floor(ms / 1000);
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  const pad = (n) => String(n).padStart(2, '0');
-  return h > 0 ? `${pad(h)}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
-}
-
-function latencyTone(ms) {
-  if (ms == null) return 'na';
-  if (ms < 0) return 'bad';
-  if (ms < 150) return 'good';
-  if (ms < 400) return 'mid';
-  return 'bad';
-}
-
-export default function ConnectHero({ connectionState, connectionMode, activeProfile, connectedAt, latencyMs, traffic, onToggle, onSetMode }) {
+export default function ConnectHero({ connectionState, connectionMode, activeProfile, onToggle, onSetMode }) {
   const busy = connectionState === 'connecting' || connectionState === 'disconnecting';
   const modeLocked = connectionState !== 'disconnected';
-  const [now, setNow] = useState(Date.now());
-
-  useEffect(() => {
-    if (connectionState !== 'connected' || !connectedAt) return;
-    const timer = setInterval(() => setNow(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [connectionState, connectedAt]);
-
-  const duration = connectionState === 'connected' && connectedAt ? formatDuration(now - connectedAt) : null;
 
   return (
-    <div className="hero">
+    <section className={`stage ${connectionState}`}>
+      <div className="aurora aurora-idle" aria-hidden="true" />
+      <div className="aurora aurora-live" aria-hidden="true" />
+
       <div className={`ring-wrap ${connectionState}`}>
-        <div className="ring-pulse" />
-        <button
-          className={`connect-btn ${connectionState}`}
-          onClick={onToggle}
-          disabled={busy}
-        >
-          <span className="icon" />
+        <div className="ring-halo" aria-hidden="true" />
+        <svg className="ring-svg" viewBox="0 0 200 200" aria-hidden="true">
+          <circle className="ring-track" cx="100" cy="100" r="88" />
+          <circle className="ring-spin" cx="100" cy="100" r="88" />
+          <circle className="ring-arc" cx="100" cy="100" r="88" />
+        </svg>
+        <button className="connect-btn" onClick={onToggle} disabled={busy}>
+          <Icon name="power" size={32} strokeWidth={2.2} />
           <span className="label">{LABELS[connectionState]}</span>
         </button>
       </div>
-      <div className="status-line">
+
+      <div className="stage-status">
         <span className={`status-dot ${connectionState}`} />
-        <span>{STATUS_TEXT[connectionState]}</span>
-        {activeProfile && connectionState !== 'disconnected' && (
-          <span className="mono" style={{ color: 'var(--text-faint)' }}>· {activeProfile.name}</span>
+        {STATUS_TEXT[connectionState]}
+      </div>
+
+      <div className="stage-server">
+        {activeProfile ? (
+          <>
+            <span className="name">{activeProfile.name || activeProfile.address}</span>
+            <span className="addr mono">{activeProfile.address}:{activeProfile.port}</span>
+          </>
+        ) : (
+          'سروری انتخاب نشده — از فهرست کناری یکی را انتخاب کن'
         )}
       </div>
-      {connectionState === 'connected' && (
-        <>
-          <div className="session-strip">
-            <span className={`latency-badge ${latencyTone(latencyMs)}`}>
-              {latencyMs == null ? 'در حال سنجش…' : latencyMs < 0 ? 'بدون پاسخ' : `${latencyMs}ms`}
-            </span>
-            {duration && <span className="duration-badge mono">{duration}</span>}
-          </div>
-          {traffic && (
-            <div className="traffic-strip mono">
-              <span className="traffic-speed down">
-                <Icon name="arrowDown" size={12} />
-                {formatSpeed(traffic.downlinkSpeed)}
-              </span>
-              <span className="traffic-speed up">
-                <Icon name="arrowUp" size={12} />
-                {formatSpeed(traffic.uplinkSpeed)}
-              </span>
-              <span className="traffic-total">{formatBytes(traffic.sessionTotal)}</span>
-            </div>
-          )}
-        </>
-      )}
-      <div className="mode-switch">
+
+      <div className={`mode-switch ${connectionMode === 'tun' ? 'tun' : ''}`}>
+        <span className="mode-thumb" aria-hidden="true" />
         <button
           className={`mode-pill ${connectionMode === 'proxy' ? 'active' : ''}`}
           disabled={modeLocked}
@@ -105,6 +70,9 @@ export default function ConnectHero({ connectionState, connectionMode, activePro
           تانل کامل
         </button>
       </div>
-    </div>
+      <div className="mode-hint">
+        {modeLocked ? 'برای تغییر حالت، اول اتصال را قطع کن' : ''}
+      </div>
+    </section>
   );
 }

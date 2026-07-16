@@ -9,6 +9,7 @@ const { XrayProcess } = require('./lib/xrayProcess.cjs');
 const systemProxy = require('./lib/systemProxy.cjs');
 const { tcpPing } = require('./lib/pingTest.cjs');
 const { proxyPing } = require('./lib/proxyPing.cjs');
+const serverTest = require('./lib/serverTest.cjs');
 const { fetchText } = require('./lib/fetchText.cjs');
 const { JsonStore } = require('./lib/store.cjs');
 const { findFreePort } = require('./lib/freePort.cjs');
@@ -260,13 +261,15 @@ const APP_ICON_PATH = path.join(__dirname, 'assets', 'icon.ico');
 
 function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 420,
-    height: 700,
-    minWidth: 380,
-    minHeight: 600,
-    backgroundColor: '#0b0d12',
+    width: 880,
+    height: 880,
+    minWidth: 720,
+    minHeight: 720,
+    backgroundColor: '#0a0d13',
     autoHideMenuBar: true,
     icon: APP_ICON_PATH,
+    frame: false, // fully custom title bar, drawn in the renderer
+    roundedCorners: true, // native DWM corner rounding on Windows 11 when not maximized
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -276,6 +279,7 @@ function createWindow() {
   });
 
   mainWindow.setMenuBarVisibility(false);
+  mainWindow.setAspectRatio(1); // the UI is designed as a 1:1 square, restored on unmaximize/leave-fullscreen below
 
   const indexPath = path.join(__dirname, '..', 'dist', 'index.html');
   mainWindow.loadFile(indexPath);
@@ -284,6 +288,22 @@ function createWindow() {
     shell.openExternal(url);
     return { action: 'deny' };
   });
+
+  const sendWindowState = () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('window-state', {
+        maximized: mainWindow.isMaximized(),
+        fullscreen: mainWindow.isFullScreen(),
+      });
+    }
+  };
+  // Maximize/fullscreen fill the whole screen, so the 1:1 lock has to relax
+  // for that duration and snap back the moment the window is a normal square again.
+  mainWindow.on('maximize', () => { mainWindow.setAspectRatio(0); sendWindowState(); });
+  mainWindow.on('unmaximize', () => { mainWindow.setAspectRatio(1); sendWindowState(); });
+  mainWindow.on('enter-full-screen', () => { mainWindow.setAspectRatio(0); sendWindowState(); });
+  mainWindow.on('leave-full-screen', () => { mainWindow.setAspectRatio(1); sendWindowState(); });
+  mainWindow.webContents.once('did-finish-load', sendWindowState);
 
   mainWindow.on('close', (e) => {
     if (!isQuitting && getSettings().minimizeToTray) {
@@ -332,6 +352,12 @@ async function connect(profileId) {
     }
     store.set('activeProfileId', profileId);
     store.set('activeMode', mode);
+    {
+      // Remember when this profile was last used, for "recently used" sorting.
+      const profiles = store.get('profiles', []);
+      const p = profiles.find((x) => x.id === profileId);
+      if (p) { p.lastUsedAt = Date.now(); store.set('profiles', profiles); }
+    }
     currentPorts = { socksPort, httpPort, apiPort };
     connectedAt = Date.now();
     reconnectAttempts = 0;
@@ -462,6 +488,17 @@ app.on('will-quit', async (e) => {
 });
 
 // ---- IPC handlers ----
+
+// ---- Window controls (custom title bar) ----
+
+ipcMain.handle('window:minimize', () => { mainWindow?.minimize(); });
+ipcMain.handle('window:toggleMaximize', () => {
+  if (!mainWindow) return;
+  if (mainWindow.isMaximized()) mainWindow.unmaximize();
+  else mainWindow.maximize();
+});
+ipcMain.handle('window:close', () => { mainWindow?.close(); });
+ipcMain.handle('window:isMaximized', () => !!mainWindow?.isMaximized());
 
 ipcMain.handle('profiles:list', () => ({
   profiles: store.get('profiles', []),
@@ -619,6 +656,71 @@ ipcMain.handle('ping:test', async (_e, profileId) => {
   if (!profile) throw new Error('کانفیگ پیدا نشد');
   const ms = await tcpPing(profile.address, profile.port, 5000);
   return { profileId, ms };
+});
+
+// ---- Server Finder test engine ----
+
+function emitTestEvent(token, type, data) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('test-event', { token, type, ...data });
+  }
+}
+
+function requireProfile(profileId) {
+  const profile = findProfile(profileId);
+  if (!profile) throw new Error('کانفیگ پیدا نشد');
+  return profile;
+}
+
+ipcMain.handle('test:ping', async (_e, { profileId, token }) => {
+  const profile = requireProfile(profileId);
+  const signal = serverTest.begin(token);
+  try {
+    return await serverTest.pingStats(profile, {
+      signal,
+      onSample: (s) => emitTestEvent(token, 'sample', s),
+    });
+  } finally {
+    serverTest.end(token);
+  }
+});
+
+ipcMain.handle('test:real', async (_e, { profileId, token }) => {
+  const profile = requireProfile(profileId);
+  const signal = serverTest.begin(token);
+  try {
+    return await serverTest.realPing(profile, {
+      xrayBin, workRoot: xrayWorkDir, signal,
+      emit: (type, data) => emitTestEvent(token, type, data),
+    });
+  } finally {
+    serverTest.end(token);
+  }
+});
+
+ipcMain.handle('test:speed', async (_e, { profileId, token }) => {
+  const profile = requireProfile(profileId);
+  const signal = serverTest.begin(token);
+  try {
+    return await serverTest.speedTest(profile, {
+      xrayBin, workRoot: xrayWorkDir, signal,
+      emit: (type, data) => emitTestEvent(token, type, data),
+    });
+  } finally {
+    serverTest.end(token);
+  }
+});
+
+ipcMain.handle('test:cancel', (_e, token) => {
+  serverTest.cancel(token);
+});
+
+ipcMain.handle('profiles:setFavorite', (_e, { id, favorite }) => {
+  const profiles = store.get('profiles', []);
+  const p = profiles.find((x) => x.id === id);
+  if (p) p.favorite = !!favorite;
+  store.set('profiles', profiles);
+  return profiles;
 });
 
 ipcMain.handle('subscriptions:refreshAll', async () => {

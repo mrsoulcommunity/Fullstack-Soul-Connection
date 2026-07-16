@@ -35,7 +35,10 @@ function ServerCard({ profile, active, ms, onSelect, onDelete, onPing }) {
     <div className={`server-card ${active ? 'active' : ''}`}>
       <span className="proto-tag">{profile.protocol}</span>
       <div className="info" onClick={() => onSelect(profile.id)}>
-        <div className="name">{profile.name || profile.address}</div>
+        <div className="name">
+          {profile.favorite && <Icon name="star" size={10} className="fav-mark" />}
+          {profile.name || profile.address}
+        </div>
         <div className="addr mono">
           {profile.address}:{profile.port}
           {profile.totalBytes > 0 && <span className="usage-tag"> · {formatBytes(profile.totalBytes)}</span>}
@@ -137,7 +140,7 @@ export default function ServerList({
                     <Icon name="chevron" size={12} />
                   </span>
                   <span className="group-name">{group.sub.name}</span>
-                  <span className="group-meta mono">به‌روزرسانی: {relativeTime(group.sub.lastUpdated)}</span>
+                  <span className="group-meta">{relativeTime(group.sub.lastUpdated)}</span>
                 </button>
                 <button className="group-action" onClick={() => onRefreshSubscription(group.sub.id)} title="به‌روزرسانی">
                   <Icon name="refresh" size={13} />

@@ -2,10 +2,39 @@ import React, { useEffect, useState, useCallback, useRef } from 'react';
 import ServerList from './components/ServerList.jsx';
 import AddModal from './components/AddModal.jsx';
 import ConnectHero from './components/ConnectHero.jsx';
+import StatusBar from './components/StatusBar.jsx';
 import SettingsView from './components/SettingsView.jsx';
+import ServerFinder from './components/ServerFinder.jsx';
 import Icon from './components/Icon.jsx';
 
 const PING_CONCURRENCY = 12;
+
+// Custom chrome for the frameless window. Standard Windows layout: app
+// icon/name at the top-left, minimize/maximize/close at the top-right in
+// that order (close outermost) -- `.titlebar` forces `direction: ltr` in CSS
+// so this physical layout holds regardless of the app's own RTL content.
+function TitleBar({ maximized, onMinimize, onToggleMaximize, onClose }) {
+  return (
+    <div className="titlebar">
+      <div className="titlebar-brand">
+        <img src="./icon.png" alt="" />
+        <span>Soul Connection</span>
+      </div>
+      <div className="titlebar-drag" onDoubleClick={onToggleMaximize} />
+      <div className="titlebar-controls">
+        <button className="tb-btn" onClick={onMinimize} title="کوچک‌کردن">
+          <Icon name="winMinimize" size={13} />
+        </button>
+        <button className="tb-btn" onClick={onToggleMaximize} title={maximized ? 'بازگردانی' : 'بیشینه‌سازی'}>
+          <Icon name={maximized ? 'winRestore' : 'winMaximize'} size={12} />
+        </button>
+        <button className="tb-btn close" onClick={onClose} title="بستن">
+          <Icon name="close" size={13} />
+        </button>
+      </div>
+    </div>
+  );
+}
 
 async function mapWithConcurrency(items, limit, worker) {
   const results = new Array(items.length);
@@ -37,8 +66,15 @@ export default function App() {
   const [tab, setTab] = useState('servers');
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
-  const [bestServerBusy, setBestServerBusy] = useState(false);
   const [updatingSubs, setUpdatingSubs] = useState(false);
+  const [finderOpen, setFinderOpen] = useState(false);
+  const [windowMaximized, setWindowMaximized] = useState(false);
+
+  useEffect(() => {
+    window.soul.windowIsMaximized?.().then(setWindowMaximized).catch(() => {});
+    const off = window.soul.onWindowState?.(({ maximized }) => setWindowMaximized(maximized));
+    return () => off && off();
+  }, []);
 
   const refresh = useCallback(async () => {
     const data = await window.soul.listProfiles();
@@ -49,6 +85,18 @@ export default function App() {
     setConnectionState(data.connectionState);
     setConnectedAt(data.connectedAt);
     setSettings(data.settings);
+  }, []);
+
+  // Ctrl+K (or Ctrl+F) opens the server finder from anywhere.
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'f')) {
+        e.preventDefault();
+        setFinderOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
 
   useEffect(() => {
@@ -135,30 +183,25 @@ export default function App() {
     await mapWithConcurrency(ids, PING_CONCURRENCY, (id) => handlePing(id));
   }
 
-  async function handleBestServer() {
-    if (!profiles.length || bestServerBusy) return;
-    setBestServerBusy(true);
+  // Connect regardless of current state (used by the finder's result cards).
+  async function handleConnectTo(id) {
+    if (busy) return;
+    setBusy(true);
     try {
-      const results = await mapWithConcurrency(profiles, PING_CONCURRENCY, async (p) => ({ id: p.id, ms: await handlePing(p.id) }));
-      const reachable = results.filter((r) => r.ms > 0);
-      if (!reachable.length) {
-        showToast('هیچ سروری در دسترس نیست');
-        return;
-      }
-      reachable.sort((a, b) => a.ms - b.ms);
-      const best = reachable[0];
-      setActiveProfileId(best.id);
-      showToast('بهترین سرور انتخاب شد، در حال اتصال…');
-      setBusy(true);
-      try {
-        await window.soul.connect(best.id);
-      } catch (err) {
-        showToast(err.message || 'خطا در اتصال');
-      } finally {
-        setBusy(false);
-      }
+      await window.soul.connect(id);
+    } catch (err) {
+      showToast(err.message || 'خطا در اتصال');
     } finally {
-      setBestServerBusy(false);
+      setBusy(false);
+    }
+  }
+
+  async function handleToggleFavorite(profile) {
+    try {
+      const updated = await window.soul.setFavorite(profile.id, !profile.favorite);
+      setProfiles(updated);
+    } catch (err) {
+      showToast(err.message || 'خطا در ذخیره');
     }
   }
 
@@ -272,44 +315,25 @@ export default function App() {
   const activeProfile = profiles.find((p) => p.id === activeProfileId);
 
   return (
-    <div className="app-shell">
-      <div className="titlebar">
-        <img className="mark" src="./icon.png" alt="" />
-        <div className="name">
-          Soul Connection
-          <small>کلاینت V2Ray / Xray</small>
-        </div>
-      </div>
-
-      <ConnectHero
-        connectionState={connectionState}
-        connectionMode={connectionMode}
-        activeProfile={activeProfile}
-        connectedAt={connectedAt}
-        latencyMs={latencyMs}
-        traffic={traffic}
-        onToggle={handleToggleConnect}
-        onSetMode={handleSetMode}
+    <div className={`app-shell ${windowMaximized ? 'maximized' : ''}`}>
+      <TitleBar
+        maximized={windowMaximized}
+        onMinimize={() => window.soul.windowMinimize()}
+        onToggleMaximize={() => window.soul.windowToggleMaximize()}
+        onClose={() => window.soul.windowClose()}
       />
-
-      {tab === 'servers' ? (
-        <div className="body">
-          <div className="section-head">
-            <h2>کانفیگ‌ها</h2>
-            <div className="head-actions">
-              <button
-                className="icon-btn"
-                onClick={handleBestServer}
-                disabled={bestServerBusy || !profiles.length}
-                title="بهترین سرور"
-              >
-                <Icon name="bolt" size={15} />
-              </button>
-              <button className="icon-btn" onClick={() => setShowAdd(true)} title="افزودن">
-                <Icon name="plus" size={16} />
-              </button>
+      <div className="workspace">
+        <aside className="sidebar">
+          <header className="sidebar-head">
+            <img className="mark" src="./icon.png" alt="" />
+            <div className="brand">
+              <span className="brand-name">Soul Connection</span>
+              <span className="brand-sub">
+                {profiles.length ? `${profiles.length} کانفیگ` : 'کلاینت V2Ray / Xray'}
+              </span>
             </div>
-          </div>
+          </header>
+
           <ServerList
             profiles={profiles}
             subscriptions={subscriptions}
@@ -325,44 +349,91 @@ export default function App() {
             onUpdateAllSubscriptions={handleUpdateAllSubscriptions}
             onDeleteSubscription={handleDeleteSubscription}
           />
-        </div>
-      ) : (
-        <div className="body">
-          <div className="section-head">
-            <h2>تنظیمات</h2>
-          </div>
-          {settings && (
-            <SettingsView
-              settings={settings}
-              connectionState={connectionState}
-              profiles={profiles}
-              appInfo={appInfo}
-              updaterStatus={updaterStatus}
-              onCheckForUpdates={() => window.soul.checkForUpdates()}
-              onDownloadUpdate={() => window.soul.downloadUpdate()}
-              onInstallUpdate={() => window.soul.installUpdate()}
-              onUpdate={handleUpdateSettings}
-              onUpdateChecked={handleUpdateSettingsChecked}
-              onOpenLogsFolder={() => window.soul.openLogsFolder()}
-              onExportBackup={handleExportBackup}
-              onImportBackup={handleImportBackup}
-              onResetUsage={handleResetUsage}
-              onResetAllUsage={handleResetAllUsage}
-            />
-          )}
-        </div>
-      )}
 
-      <div className="tabbar no-drag">
-        <button className={`tabbar-btn ${tab === 'servers' ? 'active' : ''}`} onClick={() => setTab('servers')}>
-          <Icon name="signal" size={17} />
-          سرورها
-        </button>
-        <button className={`tabbar-btn ${tab === 'settings' ? 'active' : ''}`} onClick={() => setTab('settings')}>
-          <Icon name="settings" size={17} />
-          تنظیمات
-        </button>
+          {profiles.length > 0 && (
+            <footer className="sidebar-foot">
+              <button className="btn primary add-btn" onClick={() => setShowAdd(true)}>
+                <Icon name="plus" size={15} />
+                افزودن کانفیگ
+              </button>
+              <button
+                className="icon-btn tall"
+                onClick={() => setFinderOpen(true)}
+                title="سرور یاب هوشمند (Ctrl+K)"
+              >
+                <Icon name="radar" size={15} />
+              </button>
+            </footer>
+          )}
+        </aside>
+
+        <main className="main">
+          <header className="main-head">
+            <span className="main-title">{tab === 'settings' ? 'تنظیمات' : 'کنترل اتصال'}</span>
+            <button
+              className="icon-btn ghost"
+              onClick={() => setTab(tab === 'settings' ? 'servers' : 'settings')}
+              title={tab === 'settings' ? 'بازگشت به کنترل اتصال' : 'تنظیمات'}
+            >
+              <Icon name={tab === 'settings' ? 'close' : 'settings'} size={16} />
+            </button>
+          </header>
+
+          {tab === 'servers' ? (
+            <ConnectHero
+              connectionState={connectionState}
+              connectionMode={connectionMode}
+              activeProfile={activeProfile}
+              onToggle={handleToggleConnect}
+              onSetMode={handleSetMode}
+            />
+          ) : (
+            <div className="settings-pane">
+              {settings && (
+                <SettingsView
+                  settings={settings}
+                  connectionState={connectionState}
+                  profiles={profiles}
+                  appInfo={appInfo}
+                  updaterStatus={updaterStatus}
+                  onCheckForUpdates={() => window.soul.checkForUpdates()}
+                  onDownloadUpdate={() => window.soul.downloadUpdate()}
+                  onInstallUpdate={() => window.soul.installUpdate()}
+                  onUpdate={handleUpdateSettings}
+                  onUpdateChecked={handleUpdateSettingsChecked}
+                  onOpenLogsFolder={() => window.soul.openLogsFolder()}
+                  onExportBackup={handleExportBackup}
+                  onImportBackup={handleImportBackup}
+                  onResetUsage={handleResetUsage}
+                  onResetAllUsage={handleResetAllUsage}
+                />
+              )}
+            </div>
+          )}
+
+          <StatusBar
+            connectionState={connectionState}
+            activeProfile={activeProfile}
+            connectedAt={connectedAt}
+            latencyMs={latencyMs}
+            selectedPing={activeProfileId ? pings[activeProfileId] : undefined}
+            traffic={traffic}
+            notice={toast}
+          />
+        </main>
       </div>
+
+      {finderOpen && (
+        <ServerFinder
+          profiles={profiles}
+          subscriptions={subscriptions}
+          activeProfileId={activeProfileId}
+          connectionState={connectionState}
+          onClose={() => setFinderOpen(false)}
+          onConnect={handleConnectTo}
+          onToggleFavorite={handleToggleFavorite}
+        />
+      )}
 
       {showAdd && (
         <AddModal
@@ -371,8 +442,6 @@ export default function App() {
           onAddSubscription={handleAddSubscription}
         />
       )}
-
-      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }
