@@ -1179,49 +1179,85 @@ button:disabled { cursor: default; }
 .qr-modal h3 { text-align: center; }
 .qr-modal p.hint { text-align: center; }
 
+/* Fixed footprint across loading/success/error so swapping states never
+   reflows the modal or flickers the surrounding layout. */
 .qr-stage {
+  width: 244px;
+  height: 244px;
+  margin: 4px auto 14px;
   display: flex;
   align-items: center;
   justify-content: center;
-  margin: 4px 0 14px;
+}
+
+.qr-card {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-lg);
+  background: #ffffff;
+  padding: 16px;
+  box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  animation: qr-in 0.3s cubic-bezier(0.3, 0, 0.2, 1);
 }
 
 .qr-img {
-  width: 220px;
-  height: 220px;
-  border-radius: var(--radius-md);
-  background: #fff;
-  padding: 12px;
-  box-shadow: 0 20px 50px -18px rgba(0, 0, 0, 0.6);
-  animation: qr-in 0.28s cubic-bezier(0.3, 0, 0.2, 1);
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  border-radius: calc(var(--radius-lg) - 8px);
 }
 
 @keyframes qr-in {
-  from { opacity: 0; transform: scale(0.94); }
+  from { opacity: 0; transform: scale(0.92); }
   to { opacity: 1; transform: scale(1); }
 }
 
-.qr-skeleton {
-  width: 220px;
-  height: 220px;
-  border-radius: var(--radius-md);
-  background: linear-gradient(100deg, var(--card) 30%, var(--card-hover) 50%, var(--card) 70%);
-  background-size: 200% 100%;
-  animation: skel 1.4s ease-in-out infinite;
-}
-
-.qr-error {
-  width: 220px;
-  min-height: 140px;
+.qr-state {
+  width: 100%;
+  height: 100%;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  color: var(--danger);
-  font-size: 12px;
-  padding: 12px;
+  gap: 12px;
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  border: 1px solid var(--border);
+  padding: 20px;
+  animation: qr-in 0.2s ease-out;
 }
+
+.qr-state-msg {
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.qr-spinner {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 3px solid var(--border);
+  border-top-color: var(--signal);
+  animation: spin 0.8s linear infinite;
+}
+
+.qr-error-icon {
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: rgba(239, 90, 111, 0.12);
+  color: var(--danger);
+}
+.qr-error .qr-state-msg { color: var(--danger); }
+.qr-retry { flex: none; padding: 7px 14px; display: flex; align-items: center; gap: 6px; }
 
 .qr-actions {
   display: flex;
@@ -2681,4 +2717,6 @@ kbd {
   .active-row, .lb-row, .feed-line, .done-best, .ctx-menu { animation: none; }
   .dg-ring, .dg-mark { animation: none; stroke-dashoffset: 0; }
   .dash-scroll { scroll-behavior: auto; }
+  .qr-card, .qr-state { animation: none; }
+  .qr-spinner { animation-duration: 1.4s; }
 }

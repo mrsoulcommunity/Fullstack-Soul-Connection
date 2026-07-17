@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import Icon from './Icon.jsx';
 
@@ -10,10 +10,16 @@ function slugify(text) {
     .slice(0, 60) || 'qrcode';
 }
 
+// High-resolution target: qrcode picks the largest integer per-module scale
+// that fits inside this many pixels, so the PNG stays crisp (no interpolation
+// blur) at any save/share size instead of being a soft, upscaled bitmap.
+const QR_PIXEL_TARGET = 640;
+
 export default function QrModal({ title, subtitle, value, onClose, onToast }) {
   const [dataUrl, setDataUrl] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -22,13 +28,15 @@ export default function QrModal({ title, subtitle, value, onClose, onToast }) {
     QRCode.toDataURL(value || '', {
       errorCorrectionLevel: 'M',
       margin: 2,
-      scale: 7,
-      color: { dark: '#0a0d13', light: '#ffffff' },
+      width: QR_PIXEL_TARGET,
+      color: { dark: '#0a0d13ff', light: '#ffffffff' },
     })
       .then((url) => { if (!cancelled) setDataUrl(url); })
       .catch(() => { if (!cancelled) setError('این لینک برای تبدیل به QR خیلی بزرگ است.'); });
     return () => { cancelled = true; };
-  }, [value]);
+  }, [value, attempt]);
+
+  const handleRetry = useCallback(() => setAttempt((n) => n + 1), []);
 
   async function handleCopyImage() {
     if (!dataUrl) return;
@@ -70,14 +78,24 @@ export default function QrModal({ title, subtitle, value, onClose, onToast }) {
 
         <div className="qr-stage">
           {error ? (
-            <div className="qr-error">
-              <Icon name="info" size={20} />
-              <span>{error}</span>
+            <div className="qr-state qr-error">
+              <div className="qr-error-icon">
+                <Icon name="info" size={20} />
+              </div>
+              <span className="qr-state-msg">{error}</span>
+              <button className="btn mini qr-retry" onClick={handleRetry}>
+                <Icon name="refresh" size={12} /> تلاش دوباره
+              </button>
             </div>
           ) : dataUrl ? (
-            <img className="qr-img" src={dataUrl} alt="QR Code" draggable={false} />
+            <div className="qr-card">
+              <img className="qr-img" src={dataUrl} alt="QR Code" draggable={false} />
+            </div>
           ) : (
-            <div className="qr-skeleton" aria-hidden="true" />
+            <div className="qr-state qr-loading" aria-live="polite">
+              <span className="qr-spinner" aria-hidden="true" />
+              <span className="qr-state-msg">در حال تولید QR…</span>
+            </div>
           )}
         </div>
 
