@@ -39,6 +39,8 @@ const PATHS = {
   winRestore: 'M9 6h8v8h-8Z M6 9h8v8H6Z',
   qrcode: 'M3 3h7v7H3V3Z M14 3h7v7h-7V3Z M3 14h7v7H3v-7Z M14 14h3v3h-3v-3Z M18 14h3v3h-3v-3Z M14 18h3v3h-3v-3Z M18 18h3v3h-3v-3Z M6 6h1v1H6V6Z M17 6h1v1h-1V6Z M6 17h1v1H6v-1Z',
   download: 'M12 3v13 M7 12l5 5 5-5 M4 21h16',
+  eye: 'M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7Z M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z',
+  eyeOff: 'M3 3l18 18 M10.6 5.2A11 11 0 0 1 12 5c7 0 11 7 11 7a17.6 17.6 0 0 1-3.2 4 M6.5 6.6C3.4 8.5 1 12 1 12s4 7 11 7c1.4 0 2.7-.3 3.9-.7 M9.9 9.9a3 3 0 0 0 4.2 4.2',
 };
 
 export default function Icon({ name, size = 16, strokeWidth = 2, className = '' }) {

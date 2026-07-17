@@ -1,17 +1,18 @@
 {
   "name": "soul-connection",
   "productName": "Soul Connection",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "A modern V2Ray/Xray client for Windows",
   "main": "electron/main.cjs",
-  "author": "Kasra",
+  "author": "Soul",
   "license": "MIT",
   "scripts": {
     "build:ui": "vite build",
     "start": "npm run build:ui && electron .",
     "dev": "vite build && electron .",
     "dist": "node scripts/build-exe.cjs",
-    "dist:publish": "node scripts/build-exe.cjs --publish"
+    "dist:publish": "node scripts/build-exe.cjs --publish",
+    "dist:portable": "node scripts/build-exe.cjs --portable"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.12.2",
@@ -30,6 +31,9 @@
   "build": {
     "appId": "com.kasra.soulconnection",
     "productName": "Soul Connection",
+    "directories": {
+      "output": "release"
+    },
     "files": [
       "electron/**/*",
       "dist/**/*"
@@ -50,6 +54,9 @@
       "allowToChangeInstallationDirectory": true,
       "installerIcon": "electron/assets/icon.ico",
       "uninstallerIcon": "electron/assets/icon.ico"
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}.${ext}"
     },
     "publish": [
       {

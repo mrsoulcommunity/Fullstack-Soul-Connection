@@ -65,14 +65,24 @@ export default function ServerList({
   onSelect, onDelete, onPing, onPingAll, onAdd,
   onRefreshSubscription, onUpdateAllSubscriptions, onDeleteSubscription,
   onConnectTo, onDisconnect, onRenameProfile, onEditProfile, onUpdateSubscription, onToast,
+  initialQuery, initialSortBy, initialCollapsed, onSessionChange,
 }) {
-  const [query, setQuery] = useState('');
-  const [sortBy, setSortBy] = useState('default');
-  const [collapsed, setCollapsed] = useState({});
+  const [query, setQuery] = useState(initialQuery || '');
+  const [sortBy, setSortBy] = useState(initialSortBy || 'default');
+  const [collapsed, setCollapsed] = useState(initialCollapsed || {});
   const [ctxMenu, setCtxMenu] = useState(null);
   const [modal, setModal] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [testModal, setTestModal] = useState(null); // { sub, mode, autoConnectBest }
+
+  // "Restore Previous Session" -- reports query/sortBy/collapsed up (debounced)
+  // whenever they change, so App.jsx can persist them; a no-op when the
+  // feature is off (onSessionChange is undefined in that case).
+  useEffect(() => {
+    if (!onSessionChange) return undefined;
+    const t = setTimeout(() => onSessionChange({ query, sortBy, collapsed }), 300);
+    return () => clearTimeout(t);
+  }, [query, sortBy, collapsed, onSessionChange]);
 
   // Signals the global Ctrl+V handler in App.jsx that a menu/modal owned by
   // this component is open, so it doesn't add clipboard content behind it.

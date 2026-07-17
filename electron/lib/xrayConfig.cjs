@@ -101,23 +101,36 @@ function buildOutbound(p) {
 function buildXrayConfig(profile, opts = {}) {
   const socksPort = opts.socksPort || 10808;
   const httpPort = opts.httpPort || 10809;
+  const socksHost = opts.socksHost || '127.0.0.1';
+  const httpHost = opts.httpHost || '127.0.0.1';
   const mode = opts.mode || 'proxy'; // 'proxy' | 'tun'
+
+  const socksSettings = { udp: true, auth: 'noauth' };
+  if (opts.socksAccounts && opts.socksAccounts.length) {
+    socksSettings.auth = 'password';
+    socksSettings.accounts = opts.socksAccounts; // [{ user, pass }]
+  }
+  const httpSettings = {};
+  if (opts.httpAccounts && opts.httpAccounts.length) {
+    // Presence of `accounts` is what turns on auth for xray's http inbound.
+    httpSettings.accounts = opts.httpAccounts; // [{ user, pass }]
+  }
 
   const inbounds = [
     {
       tag: 'socks-in',
-      listen: '127.0.0.1',
+      listen: socksHost,
       port: socksPort,
       protocol: 'socks',
-      settings: { auth: 'noauth', udp: true },
+      settings: socksSettings,
       sniffing: { enabled: true, destOverride: ['http', 'tls'] },
     },
     {
       tag: 'http-in',
-      listen: '127.0.0.1',
+      listen: httpHost,
       port: httpPort,
       protocol: 'http',
-      settings: {},
+      settings: httpSettings,
       sniffing: { enabled: true, destOverride: ['http', 'tls'] },
     },
   ];

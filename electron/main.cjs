@@ -10,6 +10,7 @@ const systemProxy = require('./lib/systemProxy.cjs');
 const { tcpPing } = require('./lib/pingTest.cjs');
 const { proxyPing } = require('./lib/proxyPing.cjs');
 const serverTest = require('./lib/serverTest.cjs');
+const { testLocalProxy } = require('./lib/localProxyTest.cjs');
 const { fetchText } = require('./lib/fetchText.cjs');
 const { JsonStore } = require('./lib/store.cjs');
 const { findFreePort } = require('./lib/freePort.cjs');
@@ -26,22 +27,44 @@ const MAX_RECONNECT_ATTEMPTS = 5;
 
 const DEFAULT_SETTINGS = {
   launchOnStartup: false,
-  autoConnect: false,
+  runLocalProxyOnStartup: false, // replaces the old autoConnect (migrated in getSettings())
+  startMinimized: false,
+  restorePreviousSession: false, // renderer-owned UI state; main just persists/exposes it
   minimizeToTray: true,
   autoReconnect: true,
   subAutoUpdateInterval: 0, // ms; 0 = off
   xrayLogLevel: 'warning',
   socksPort: SOCKS_PORT, // preferred; auto-bumped to the next free port if taken
   httpPort: HTTP_PORT,
+  socksHost: '127.0.0.1',
+  socksUsername: '',
+  socksPassword: '',
+  httpHost: '127.0.0.1',
+  httpUsername: '',
+  httpPassword: '',
   customBypass: '', // extra semicolon-separated hosts/patterns added to the system-proxy bypass list
 };
 
+// True portable mode: electron-builder's portable Windows target sets
+// PORTABLE_EXECUTABLE_DIR (the folder containing the actual .exe, as opposed
+// to the temp dir it's extracted/run from) so the app can keep all of its
+// data next to the exe instead of scattering it into the user's AppData --
+// carry the exe + its "data" folder anywhere and it's fully self-contained,
+// with no trace left on a machine after you delete that folder. Falls back
+// to the normal per-user AppData path for the NSIS-installed build and for
+// local development (where this env var is never set).
+if (process.env.PORTABLE_EXECUTABLE_DIR) {
+  app.setPath('userData', path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'data'));
+}
+
 const userDataDir = app.getPath('userData');
+fs.mkdirSync(userDataDir, { recursive: true });
 const store = new JsonStore(path.join(userDataDir, 'profiles.json'), {
   profiles: [],
   subscriptions: [],
   activeProfileId: null,
   settings: { ...DEFAULT_SETTINGS },
+  systemProxyEnabled: false, // app-owned live state, not a user preference -- set only by systemProxy:enable/disable and the disconnect safety net
 });
 
 const xrayBin = app.isPackaged
@@ -50,7 +73,18 @@ const xrayBin = app.isPackaged
 const xrayWorkDir = path.join(userDataDir, 'xray-run');
 
 const xray = new XrayProcess(xrayBin, xrayWorkDir);
-if (process.env.SC_DEBUG) xray.on('log', (l) => console.log('[xray]', l.trim()));
+
+// Local proxy log panel (Network settings): keep a capped ring buffer so a
+// freshly opened panel isn't empty, and forward each line live.
+const MAX_PROXY_LOGS = 300;
+let proxyLogRing = [];
+xray.on('log', (text) => {
+  const entry = { t: Date.now(), text: text.trim() };
+  proxyLogRing.push(entry);
+  if (proxyLogRing.length > MAX_PROXY_LOGS) proxyLogRing.splice(0, proxyLogRing.length - MAX_PROXY_LOGS);
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('proxy-log', entry);
+  if (process.env.SC_DEBUG) console.log('[xray]', entry.text);
+});
 
 let mainWindow = null;
 let tray = null;
@@ -79,7 +113,17 @@ function serialize(fn) {
 let connectionState = 'disconnected'; // disconnected | connecting | connected | disconnecting
 
 function getSettings() {
-  return { ...DEFAULT_SETTINGS, ...store.get('settings', {}) };
+  const raw = store.get('settings', {});
+  // One-time migration: the old autoConnect toggle became runLocalProxyOnStartup
+  // (same trigger -- connect to the last active profile at launch -- but no
+  // longer auto-enables system proxy as a side effect). Idempotent: once
+  // migrated, 'runLocalProxyOnStartup' in raw is true and this is a no-op.
+  if ('autoConnect' in raw && !('runLocalProxyOnStartup' in raw)) {
+    raw.runLocalProxyOnStartup = raw.autoConnect;
+    delete raw.autoConnect;
+    store.set('settings', raw);
+  }
+  return { ...DEFAULT_SETTINGS, ...raw };
 }
 
 function updateSettings(patch) {
@@ -102,6 +146,7 @@ function sendState() {
       connectionState,
       activeProfileId: store.get('activeProfileId', null),
       connectedAt,
+      systemProxyEnabled: store.get('systemProxyEnabled', false),
     });
   }
   updateTray();
@@ -282,7 +327,19 @@ function createWindow() {
   mainWindow.setMenuBarVisibility(false);
   mainWindow.setAspectRatio(1); // the UI is designed as a 1:1 square, restored on unmaximize/leave-fullscreen below
 
-  mainWindow.once('ready-to-show', () => { mainWindow.show(); });
+  mainWindow.once('ready-to-show', () => {
+    const settings = getSettings();
+    if (settings.startMinimized) {
+      // Tray-enabled: stay fully hidden -- the tray icon's click handler
+      // (and its "باز کردن" menu item) already call mainWindow.show() to restore.
+      if (!settings.minimizeToTray) {
+        mainWindow.show();
+        mainWindow.minimize();
+      }
+    } else {
+      mainWindow.show();
+    }
+  });
 
   const indexPath = path.join(__dirname, '..', 'dist', 'index.html');
   mainWindow.loadFile(indexPath);
@@ -348,11 +405,16 @@ async function connect(profileId) {
     const preferredHttp = settings.httpPort === socksPort ? settings.httpPort + 1 : settings.httpPort;
     const httpPort = await findFreePort(preferredHttp);
     const apiPort = await findFreePort(API_PORT === socksPort || API_PORT === httpPort ? httpPort + 1 : API_PORT);
-    const config = buildXrayConfig(profile, { socksPort, httpPort, apiPort, mode, logLevel: settings.xrayLogLevel });
+    const config = buildXrayConfig(profile, {
+      socksPort, httpPort, apiPort, mode, logLevel: settings.xrayLogLevel,
+      socksHost: settings.socksHost, httpHost: settings.httpHost,
+      socksAccounts: settings.socksUsername ? [{ user: settings.socksUsername, pass: settings.socksPassword || '' }] : undefined,
+      httpAccounts: settings.httpUsername ? [{ user: settings.httpUsername, pass: settings.httpPassword || '' }] : undefined,
+    });
+    // Connecting only starts the local proxy (xray) -- System Proxy is a fully
+    // separate, user-controlled toggle (see systemProxy:enable/disable below)
+    // so flipping it on/off never restarts the tunnel.
     await xray.start(config);
-    if (mode === 'proxy') {
-      await systemProxy.enable('127.0.0.1', httpPort, systemProxy.buildBypass(settings.customBypass));
-    }
     store.set('activeProfileId', profileId);
     store.set('activeMode', mode);
     {
@@ -379,16 +441,21 @@ async function connect(profileId) {
   }
 }
 
+// Safety net: a dead local proxy port left as the active Windows system proxy
+// means no internet for the user, so any time the tunnel actually stops we
+// clear system proxy too. This is distinct from systemProxy:disable, which
+// the user can call independently at any time without touching the tunnel.
+async function disableSystemProxySafetyNet() {
+  if (!store.get('systemProxyEnabled', false)) return;
+  try { await systemProxy.disable(); } catch { /* ignore */ }
+  store.set('systemProxyEnabled', false);
+}
+
 async function disconnect() {
   if (connectionState === 'disconnected') return;
   connectionState = 'disconnecting';
   sendState();
-  const activeMode = store.get('activeMode', 'proxy');
-  if (activeMode === 'proxy') {
-    try {
-      await systemProxy.disable();
-    } catch { /* ignore */ }
-  }
+  await disableSystemProxySafetyNet();
   expectedExit = true;
   await xray.stop();
   connectionState = 'disconnected';
@@ -411,12 +478,14 @@ xray.on('exit', async () => {
   sendState();
 
   if (!getSettings().autoReconnect) {
+    await disableSystemProxySafetyNet();
     notify('اتصال قطع شد', 'تونل به‌طور غیرمنتظره قطع شد.');
     return;
   }
 
   const profileId = store.get('activeProfileId');
   if (!profileId || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+    await disableSystemProxySafetyNet();
     notify('اتصال قطع شد', 'تلاش برای اتصال مجدد ناموفق بود.');
     reconnectAttempts = 0;
     return;
@@ -427,6 +496,14 @@ xray.on('exit', async () => {
   await new Promise((r) => setTimeout(r, 2000 * reconnectAttempts));
   try {
     await serialize(() => connect(profileId));
+    // A successful reconnect can land on a different port than before (port
+    // conflict fallback) -- if system proxy was on, resync it to the new
+    // port instead of leaving it pointed at the now-dead old one.
+    if (store.get('systemProxyEnabled', false) && currentPorts) {
+      try {
+        await systemProxy.enable('127.0.0.1', currentPorts.httpPort, systemProxy.buildBypass(getSettings().customBypass));
+      } catch { /* ignore */ }
+    }
   } catch { /* xray's own 'exit' event will fire again and retry, up to the cap */ }
 });
 
@@ -458,7 +535,7 @@ app.whenReady().then(async () => {
   app.setLoginItemSettings({ openAtLogin: !!settings.launchOnStartup });
   scheduleSubAutoUpdate();
 
-  if (settings.autoConnect) {
+  if (settings.runLocalProxyOnStartup) {
     const profileId = store.get('activeProfileId');
     if (profileId && findProfile(profileId)) {
       serialize(() => connect(profileId)).then(
@@ -514,6 +591,7 @@ ipcMain.handle('profiles:list', () => ({
   connectionState,
   connectedAt,
   settings: getSettings(),
+  systemProxyEnabled: store.get('systemProxyEnabled', false),
 }));
 
 ipcMain.handle('settings:setMode', async (_e, mode) => {
@@ -770,9 +848,24 @@ ipcMain.handle('subscriptions:refreshAll', async () => {
 ipcMain.handle('settings:get', () => getSettings());
 
 const LOG_LEVELS = new Set(['none', 'error', 'warning', 'info', 'debug']);
-const BOOLEAN_SETTINGS = new Set(['launchOnStartup', 'autoConnect', 'minimizeToTray', 'autoReconnect']);
+const BOOLEAN_SETTINGS = new Set([
+  'launchOnStartup', 'runLocalProxyOnStartup', 'startMinimized', 'restorePreviousSession',
+  'minimizeToTray', 'autoReconnect',
+]);
 const PORT_SETTINGS = new Set(['socksPort', 'httpPort']);
+const HOST_SETTINGS = new Set(['socksHost', 'httpHost']);
+const TEXT_SETTINGS = new Set(['socksUsername', 'socksPassword', 'httpUsername', 'httpPassword']);
 const isValidPort = (v) => typeof v === 'number' && Number.isInteger(v) && v >= 1024 && v <= 65535;
+// Accepts a dotted IPv4 address (with octet range checking) or a bare
+// hostname/domain, matching the "127.0.0.1 or any custom IP/domain" spec.
+const IPV4_RE = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+const HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/;
+function isValidHost(v) {
+  if (typeof v !== 'string' || !v.trim()) return false;
+  const m = v.match(IPV4_RE);
+  if (m) return m.slice(1).every((o) => Number(o) >= 0 && Number(o) <= 255);
+  return HOSTNAME_RE.test(v);
+}
 
 ipcMain.handle('settings:update', (_e, patch) => {
   const allowed = new Set(Object.keys(DEFAULT_SETTINGS));
@@ -788,6 +881,10 @@ ipcMain.handle('settings:update', (_e, patch) => {
       if (!LOG_LEVELS.has(value)) continue;
     } else if (PORT_SETTINGS.has(key)) {
       if (!isValidPort(value)) continue;
+    } else if (HOST_SETTINGS.has(key)) {
+      if (!isValidHost(value)) continue;
+    } else if (TEXT_SETTINGS.has(key)) {
+      if (typeof value !== 'string' || value.length > 256) continue;
     } else if (key === 'customBypass') {
       if (typeof value !== 'string' || value.length > 2000) continue;
     }
@@ -814,6 +911,56 @@ ipcMain.handle('settings:update', (_e, patch) => {
 
 ipcMain.handle('app:openLogsFolder', () => {
   shell.openPath(xrayWorkDir);
+});
+
+ipcMain.handle('app:openProxyFolder', () => {
+  shell.openPath(xrayWorkDir);
+});
+
+// System Proxy is fully decoupled from the tunnel: enabling it only points
+// Windows at the already-running local proxy, disabling it only resets the
+// registry -- neither one starts/stops xray.
+ipcMain.handle('systemProxy:enable', async () => {
+  if (connectionState !== 'connected' || !currentPorts) {
+    throw new Error('اول باید پروکسی محلی را روشن کنی (به یک سرور وصل شو)');
+  }
+  const settings = getSettings();
+  await systemProxy.enable('127.0.0.1', currentPorts.httpPort, systemProxy.buildBypass(settings.customBypass));
+  store.set('systemProxyEnabled', true);
+  sendState();
+  return true;
+});
+
+ipcMain.handle('systemProxy:disable', async () => {
+  await systemProxy.disable();
+  store.set('systemProxyEnabled', false);
+  sendState();
+  return true;
+});
+
+ipcMain.handle('network:testConnection', async (_e, { protocol }) => {
+  if (connectionState !== 'connected' || !currentPorts) {
+    return { ok: false, reason: 'not-running', message: 'پروکسی محلی در حال اجرا نیست' };
+  }
+  const settings = getSettings();
+  const isSocks = protocol === 'socks';
+  return testLocalProxy({
+    protocol,
+    host: '127.0.0.1',
+    port: isSocks ? currentPorts.socksPort : currentPorts.httpPort,
+    username: isSocks ? settings.socksUsername : settings.httpUsername,
+    password: isSocks ? settings.socksPassword : settings.httpPassword,
+  });
+});
+
+ipcMain.handle('network:getRecentLogs', () => proxyLogRing);
+
+const NETWORK_RESET_KEYS = ['socksHost', 'socksPort', 'socksUsername', 'socksPassword', 'httpHost', 'httpPort', 'httpUsername', 'httpPassword', 'customBypass'];
+ipcMain.handle('network:resetDefaults', () => {
+  if (connectionState !== 'disconnected') throw new Error('اول باید قطع اتصال کنی');
+  const patch = {};
+  for (const key of NETWORK_RESET_KEYS) patch[key] = DEFAULT_SETTINGS[key];
+  return updateSettings(patch);
 });
 
 ipcMain.handle('app:getInfo', () => ({

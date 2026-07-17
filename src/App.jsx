@@ -6,6 +6,7 @@ import StatusBar from './components/StatusBar.jsx';
 import SettingsView from './components/SettingsView.jsx';
 import ServerFinder from './components/ServerFinder.jsx';
 import Icon from './components/Icon.jsx';
+import { loadSession, saveSession, clearSession } from './utils/sessionState.js';
 
 const PING_CONCURRENCY = 12;
 
@@ -63,12 +64,19 @@ export default function App() {
   const [updaterStatus, setUpdaterStatus] = useState(null);
   const [pings, setPings] = useState({});
   const [showAdd, setShowAdd] = useState(false);
-  const [tab, setTab] = useState('servers');
+  // Seeded eagerly (before `settings` loads) from whatever was last saved --
+  // if "Restore Previous Session" turns out to be off, the effect below
+  // wipes the stored session so the NEXT launch starts clean. A one-time
+  // restore before that check resolves is a harmless, self-correcting edge
+  // case, not worth delaying the sidebar's first render to avoid.
+  const sessionRef = useRef(loadSession() || {});
+  const [tab, setTab] = useState(() => sessionRef.current.tab || 'servers');
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
   const [updatingSubs, setUpdatingSubs] = useState(false);
   const [finderOpen, setFinderOpen] = useState(false);
   const [windowMaximized, setWindowMaximized] = useState(false);
+  const [systemProxyEnabled, setSystemProxyEnabled] = useState(false);
 
   useEffect(() => {
     window.soul.windowIsMaximized?.().then(setWindowMaximized).catch(() => {});
@@ -85,6 +93,7 @@ export default function App() {
     setConnectionState(data.connectionState);
     setConnectedAt(data.connectedAt);
     setSettings(data.settings);
+    setSystemProxyEnabled(data.systemProxyEnabled);
   }, []);
 
   // Ctrl+K (or Ctrl+F) opens the server finder from anywhere.
@@ -142,10 +151,11 @@ export default function App() {
   useEffect(() => {
     refresh();
     window.soul.getAppInfo().then(setAppInfo).catch(() => {});
-    const offState = window.soul.onStateChanged(({ connectionState, activeProfileId, connectedAt }) => {
+    const offState = window.soul.onStateChanged(({ connectionState, activeProfileId, connectedAt, systemProxyEnabled }) => {
       setConnectionState(connectionState);
       setActiveProfileId(activeProfileId);
       setConnectedAt(connectedAt);
+      setSystemProxyEnabled(systemProxyEnabled);
       if (connectionState !== 'connected') {
         setLatencyMs(null);
         setTraffic(null);
@@ -159,6 +169,25 @@ export default function App() {
     const offUpdater = window.soul.onUpdaterStatus(setUpdaterStatus);
     return () => { offState(); offLatency(); offTraffic(); offProfiles(); offOpenSettings(); offUpdater(); };
   }, [refresh]);
+
+  // "Restore Previous Session": persist the active tab whenever it changes,
+  // but only while the setting is on -- and wipe any stored session the
+  // moment it's turned off, so a disabled toggle actually stays disabled.
+  useEffect(() => {
+    if (!settings) return;
+    if (!settings.restorePreviousSession) {
+      clearSession();
+      return;
+    }
+    saveSession({ ...sessionRef.current, tab });
+  }, [tab, settings]);
+
+  // Debounced report from ServerList of query/sortBy/collapsed -- merged
+  // into the same stored session object as `tab`.
+  const handleSessionChange = useCallback((partial) => {
+    sessionRef.current = { ...sessionRef.current, ...partial };
+    if (settings?.restorePreviousSession) saveSession({ ...sessionRef.current, tab });
+  }, [tab, settings]);
 
   // Stabilized with useCallback: these flow into React.memo'd children
   // (ServerCard via ServerList, ConnectHero, StatusBar) that sit in the
@@ -385,6 +414,38 @@ export default function App() {
     setProfiles(updated);
   }
 
+  const handleSystemProxyEnable = useCallback(async () => {
+    try {
+      await window.soul.systemProxyEnable();
+      setSystemProxyEnabled(true);
+      showToast('پروکسی سیستم فعال شد');
+    } catch (err) {
+      showToast(err.message || 'خطا در فعال‌سازی پروکسی سیستم', 'error');
+    }
+  }, [showToast]);
+
+  const handleSystemProxyDisable = useCallback(async () => {
+    try {
+      await window.soul.systemProxyDisable();
+      setSystemProxyEnabled(false);
+      showToast('پروکسی سیستم بازنشانی شد');
+    } catch (err) {
+      showToast(err.message || 'خطا در بازنشانی پروکسی سیستم', 'error');
+    }
+  }, [showToast]);
+
+  const handleOpenProxyFolder = useCallback(() => window.soul.openProxyFolder(), []);
+
+  const handleResetNetworkDefaults = useCallback(async () => {
+    try {
+      const updated = await window.soul.resetNetworkDefaults();
+      setSettings(updated);
+      showToast('تنظیمات شبکه بازنشانی شد');
+    } catch (err) {
+      showToast(err.message || 'خطا در بازنشانی تنظیمات شبکه', 'error');
+    }
+  }, [showToast]);
+
   const activeProfile = useMemo(
     () => profiles.find((p) => p.id === activeProfileId),
     [profiles, activeProfileId]
@@ -431,6 +492,10 @@ export default function App() {
             onEditProfile={handleEditProfile}
             onUpdateSubscription={handleUpdateSubscription}
             onToast={showToast}
+            initialQuery={sessionRef.current.query}
+            initialSortBy={sessionRef.current.sortBy}
+            initialCollapsed={sessionRef.current.collapsed}
+            onSessionChange={handleSessionChange}
           />
 
           {profiles.length > 0 && (
@@ -478,6 +543,7 @@ export default function App() {
                   connectionState={connectionState}
                   profiles={profiles}
                   appInfo={appInfo}
+                  systemProxyEnabled={systemProxyEnabled}
                   updaterStatus={updaterStatus}
                   onCheckForUpdates={() => window.soul.checkForUpdates()}
                   onDownloadUpdate={() => window.soul.downloadUpdate()}
@@ -489,6 +555,10 @@ export default function App() {
                   onImportBackup={handleImportBackup}
                   onResetUsage={handleResetUsage}
                   onResetAllUsage={handleResetAllUsage}
+                  onSystemProxyEnable={handleSystemProxyEnable}
+                  onSystemProxyDisable={handleSystemProxyDisable}
+                  onOpenProxyFolder={handleOpenProxyFolder}
+                  onResetNetworkDefaults={handleResetNetworkDefaults}
                 />
               )}
             </div>

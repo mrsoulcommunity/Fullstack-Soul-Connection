@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import Icon from './Icon.jsx';
 import { formatBytes } from '../utils/format.js';
+import { Section, Toggle } from './settingsPrimitives.jsx';
+import NetworkSettings from './NetworkSettings.jsx';
 
 const INTERVAL_OPTIONS = [
   { value: 0, label: 'خاموش' },
@@ -15,26 +17,6 @@ const LOG_LEVELS = [
   { value: 'debug', label: 'دیباگ' },
 ];
 
-function Toggle({ checked, onChange, label, hint }) {
-  return (
-    <label className="setting-row">
-      <div className="setting-text">
-        <span className="setting-label">{label}</span>
-        {hint && <span className="setting-hint">{hint}</span>}
-      </div>
-      <button
-        className={`switch ${checked ? 'on' : ''}`}
-        onClick={() => onChange(!checked)}
-        role="switch"
-        aria-checked={checked}
-        type="button"
-      >
-        <span className="knob" />
-      </button>
-    </label>
-  );
-}
-
 function updaterStatusHint(updaterStatus) {
   switch (updaterStatus?.status) {
     case 'checking': return 'در حال بررسی…';
@@ -47,108 +29,12 @@ function updaterStatusHint(updaterStatus) {
   }
 }
 
-function Section({ title, icon, description, children }) {
-  return (
-    <section className="settings-card">
-      <header className="settings-card-head">
-        <span className="settings-card-icon"><Icon name={icon} size={16} /></span>
-        <div className="settings-card-heading">
-          <h4 className="settings-section-title">{title}</h4>
-          {description && <p className="settings-card-desc">{description}</p>}
-        </div>
-      </header>
-      <div className="settings-card-body">{children}</div>
-    </section>
-  );
-}
-
-// Mirrors its own draft while typing, but always re-syncs to the real,
-// backend-confirmed value once a commit attempt settles -- whether it
-// succeeded or was rejected (e.g. SOCKS/HTTP port collision) -- so the field
-// never keeps showing a value that was never actually applied.
-function PortField({ label, value, onCommit, disabled }) {
-  const [draft, setDraft] = useState(String(value));
-  const [error, setError] = useState('');
-
-  useEffect(() => { setDraft(String(value)); }, [value]);
-
-  async function commit() {
-    const n = Number(draft);
-    if (!Number.isInteger(n) || n < 1024 || n > 65535) {
-      setError('بین ۱۰۲۴ تا ۶۵۵۳۵');
-      setDraft(String(value));
-      return;
-    }
-    setError('');
-    if (n === value) return;
-    try {
-      await onCommit(n);
-    } catch (err) {
-      setDraft(String(value));
-      setError(err.message || 'ذخیره نشد');
-    }
-  }
-
-  return (
-    <div className="setting-row">
-      <div className="setting-text">
-        <span className="setting-label">{label}</span>
-        {error && <span className="setting-hint error">{error}</span>}
-      </div>
-      <input
-        className="setting-select port-input mono"
-        type="number"
-        min={1024}
-        max={65535}
-        value={draft}
-        disabled={disabled}
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur(); }}
-      />
-    </div>
-  );
-}
-
-function BypassField({ value, onCommit }) {
-  const [draft, setDraft] = useState(value || '');
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => { setDraft(value || ''); }, [value]);
-
-  async function commit() {
-    if (draft === (value || '')) return;
-    setSaving(true);
-    try {
-      await onCommit(draft);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="setting-row column">
-      <div className="setting-text">
-        <span className="setting-label">لیست bypass سفارشی</span>
-        <span className="setting-hint">آدرس‌ها یا الگوهایی که باید همیشه مستقیم (بدون پروکسی) باز شوند؛ با ; یا خط جدید جدا کن. مثال: example.com;10.20.*</span>
-      </div>
-      <textarea
-        className="mono bypass-textarea"
-        value={draft}
-        placeholder="example.com;*.internal.local"
-        onChange={(e) => setDraft(e.target.value)}
-        onBlur={commit}
-        disabled={saving}
-      />
-    </div>
-  );
-}
-
 export default function SettingsView({
-  settings, connectionState, profiles, appInfo,
+  settings, connectionState, profiles, appInfo, systemProxyEnabled,
   updaterStatus, onCheckForUpdates, onDownloadUpdate, onInstallUpdate,
   onUpdate, onUpdateChecked, onOpenLogsFolder,
   onExportBackup, onImportBackup, onResetUsage, onResetAllUsage,
+  onSystemProxyEnable, onSystemProxyDisable, onOpenProxyFolder, onResetNetworkDefaults,
 }) {
   const portsLocked = connectionState !== 'disconnected';
   const totalUsage = (profiles || []).reduce((sum, p) => sum + (p.totalBytes || 0), 0);
@@ -163,10 +49,16 @@ export default function SettingsView({
           onChange={(v) => onUpdate({ launchOnStartup: v })}
         />
         <Toggle
-          label="اتصال خودکار هنگام اجرا"
-          hint="به آخرین سرور فعال، خودکار وصل شود"
-          checked={settings.autoConnect}
-          onChange={(v) => onUpdate({ autoConnect: v })}
+          label="اجرای پروکسی محلی هنگام شروع"
+          hint="به آخرین سرور فعال، خودکار وصل می‌شود؛ پروکسی سیستم را خودکار روشن نمی‌کند"
+          checked={settings.runLocalProxyOnStartup}
+          onChange={(v) => onUpdate({ runLocalProxyOnStartup: v })}
+        />
+        <Toggle
+          label="شروع به‌صورت کوچک‌شده"
+          hint="پنجره هنگام اجرا نمایش داده نمی‌شود"
+          checked={settings.startMinimized}
+          onChange={(v) => onUpdate({ startMinimized: v })}
         />
         <Toggle
           label="کوچک‌شدن به Tray"
@@ -180,26 +72,15 @@ export default function SettingsView({
           checked={settings.autoReconnect}
           onChange={(v) => onUpdate({ autoReconnect: v })}
         />
+        <Toggle
+          label="بازیابی نشست قبلی"
+          hint="آخرین تب، جست‌وجو، مرتب‌سازی و گروه‌های بازشده به همان حالت قبل برمی‌گردند"
+          checked={settings.restorePreviousSession}
+          onChange={(v) => onUpdate({ restorePreviousSession: v })}
+        />
       </Section>
 
-      <Section title="شبکه" icon="wifi" description="پورت‌های پروکسی و مسیرهای bypass">
-        <PortField
-          label="پورت SOCKS"
-          value={settings.socksPort}
-          disabled={portsLocked}
-          onCommit={(v) => onUpdateChecked({ socksPort: v })}
-        />
-        <PortField
-          label="پورت HTTP"
-          value={settings.httpPort}
-          disabled={portsLocked}
-          onCommit={(v) => onUpdateChecked({ httpPort: v })}
-        />
-        {portsLocked && (
-          <p className="setting-hint" style={{ marginTop: -4, marginBottom: 10 }}>
-            برای تغییر پورت‌ها، اول قطع اتصال کن. اگر پورت انتخابی اشغال باشد، برنامه خودش نزدیک‌ترین پورت آزاد را انتخاب می‌کند.
-          </p>
-        )}
+      <Section title="ساب‌اسکریپشن" icon="refresh" description="به‌روزرسانی خودکار">
         <div className="setting-row">
           <div className="setting-text">
             <span className="setting-label">به‌روزرسانی خودکار ساب‌اسکریپشن‌ها</span>
@@ -214,11 +95,19 @@ export default function SettingsView({
             ))}
           </select>
         </div>
-        <BypassField
-          value={settings.customBypass}
-          onCommit={(v) => onUpdate({ customBypass: v })}
-        />
       </Section>
+
+      <NetworkSettings
+        settings={settings}
+        connectionState={connectionState}
+        systemProxyEnabled={systemProxyEnabled}
+        onUpdate={onUpdate}
+        onUpdateChecked={onUpdateChecked}
+        onSystemProxyEnable={onSystemProxyEnable}
+        onSystemProxyDisable={onSystemProxyDisable}
+        onOpenProxyFolder={onOpenProxyFolder}
+        onResetNetworkDefaults={onResetNetworkDefaults}
+      />
 
       <Section title="مصرف داده" icon="database" description="میزان ترافیک مصرفی هر سرور">
         <div className="setting-row">

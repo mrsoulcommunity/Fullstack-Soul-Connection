@@ -19,15 +19,39 @@ const subscriptions = [
   { id: 's2', name: 'بکاپ رایگان', lastUpdated: Date.now() - 26 * 3600000, url: 'https://sub.soulnet.dev/free/xyz789', configCount: 3 },
 ];
 
+const DEFAULT_SETTINGS = {
+  launchOnStartup: false,
+  runLocalProxyOnStartup: false,
+  startMinimized: false,
+  restorePreviousSession: false,
+  minimizeToTray: true,
+  autoReconnect: true,
+  subAutoUpdateInterval: 0,
+  xrayLogLevel: 'warning',
+  socksPort: 10808,
+  httpPort: 10809,
+  socksHost: '127.0.0.1',
+  socksUsername: '',
+  socksPassword: '',
+  httpHost: '127.0.0.1',
+  httpUsername: '',
+  httpPassword: '',
+  customBypass: '',
+};
+
 export function installDevMock() {
+  let settings = { ...DEFAULT_SETTINGS };
+  let systemProxyEnabled = false;
   let state = {
     activeProfileId: 'p1',
     connectionMode: 'proxy',
     connectionState: 'disconnected',
     connectedAt: null,
   };
-  const listeners = { state: [], latency: [], traffic: [], profiles: [], settings: [], updater: [], test: [] };
+  const listeners = { state: [], latency: [], traffic: [], profiles: [], settings: [], updater: [], test: [], proxyLog: [] };
   const cancelled = new Set();
+  let proxyLogRing = [];
+  let proxyLogTimer = null;
 
   const emitTest = (payload) => listeners.test.forEach((fn) => fn(payload));
   const rnd = (lo, hi) => lo + Math.random() * (hi - lo);
@@ -56,7 +80,7 @@ export function installDevMock() {
   let latencyTimer = null;
   let sessionTotal = 0;
 
-  const emitState = () => listeners.state.forEach((fn) => fn({ ...state }));
+  const emitState = () => listeners.state.forEach((fn) => fn({ ...state, systemProxyEnabled }));
   const on = (key) => (fn) => {
     listeners[key].push(fn);
     return () => listeners[key].splice(listeners[key].indexOf(fn), 1);
@@ -73,21 +97,28 @@ export function installDevMock() {
     latencyTimer = setInterval(() => {
       listeners.latency.forEach((fn) => fn({ ms: 38 + Math.round(Math.random() * 30) }));
     }, 2000);
+    const PROXY_LOG_LINES = [
+      'accepted socks:127.0.0.1', 'accepted http:127.0.0.1', '[Warning] transport/internet/tcp: dial tcp failed, retrying',
+      'tunnel: handshake completed', 'proxy/socks: TCP Connect', 'app/dispatcher: sniffed domain: example.com',
+    ];
+    proxyLogTimer = setInterval(() => {
+      const entry = { t: Date.now(), text: PROXY_LOG_LINES[Math.floor(Math.random() * PROXY_LOG_LINES.length)] };
+      proxyLogRing = [...proxyLogRing, entry].slice(-300);
+      listeners.proxyLog.forEach((fn) => fn(entry));
+    }, 1800);
   }
 
   function stopTelemetry() {
     clearInterval(trafficTimer);
     clearInterval(latencyTimer);
+    clearInterval(proxyLogTimer);
   }
 
   window.soul = {
     listProfiles: async () => ({
       profiles, subscriptions, ...state,
-      settings: {
-        socksPort: 10808, httpPort: 10809, autoConnect: false, minimizeToTray: true,
-        startWithWindows: false, subUpdateIntervalMs: 0, logLevel: 'warning',
-        bypassList: 'localhost;127.*;*.ir',
-      },
+      settings,
+      systemProxyEnabled,
     }),
     getAppInfo: async () => ({ version: '2.0.0-dev', xrayVersion: '25.1.30' }),
     connect: async (id) => {
@@ -103,6 +134,9 @@ export function installDevMock() {
       emitState();
       await new Promise((r) => setTimeout(r, 700));
       stopTelemetry();
+      // Mirrors the real app's disconnect-time safety net: a dead local
+      // proxy left as the active system proxy would break the user's internet.
+      systemProxyEnabled = false;
       state = { ...state, connectionState: 'disconnected', connectedAt: null };
       emitState();
     },
@@ -129,7 +163,10 @@ export function installDevMock() {
       if (s) Object.assign(s, patch);
       return [...subscriptions];
     },
-    updateSettings: async (patch) => patch,
+    updateSettings: async (patch) => {
+      settings = { ...settings, ...patch };
+      return { ...settings };
+    },
     exportBackup: async () => ({ canceled: true }),
     importBackup: async () => ({ canceled: true }),
     saveImage: async () => ({ canceled: true }),
@@ -140,6 +177,37 @@ export function installDevMock() {
     downloadUpdate: () => {},
     installUpdate: () => {},
     openLogsFolder: () => {},
+    openProxyFolder: () => {},
+
+    systemProxyEnable: async () => {
+      if (state.connectionState !== 'connected') throw new Error('اول باید پروکسی محلی را روشن کنی (به یک سرور وصل شو)');
+      await new Promise((r) => setTimeout(r, 250));
+      systemProxyEnabled = true;
+      emitState();
+      return true;
+    },
+    systemProxyDisable: async () => {
+      await new Promise((r) => setTimeout(r, 150));
+      systemProxyEnabled = false;
+      emitState();
+      return true;
+    },
+    testProxyConnection: async (protocol) => {
+      if (state.connectionState !== 'connected') return { ok: false, reason: 'not-running', message: 'پروکسی محلی در حال اجرا نیست' };
+      await new Promise((r) => setTimeout(r, 600 + Math.random() * 600));
+      const user = protocol === 'socks' ? settings.socksUsername : settings.httpUsername;
+      if (user && Math.random() < 0.2) return { ok: false, reason: 'auth-failed', message: 'نام کاربری یا رمز عبور اشتباه است' };
+      return { ok: true, ms: 20 + Math.round(Math.random() * 60) };
+    },
+    resetNetworkDefaults: async () => {
+      const keys = ['socksHost', 'socksPort', 'socksUsername', 'socksPassword', 'httpHost', 'httpPort', 'httpUsername', 'httpPassword', 'customBypass'];
+      const patch = {};
+      for (const k of keys) patch[k] = DEFAULT_SETTINGS[k];
+      settings = { ...settings, ...patch };
+      return { ...settings };
+    },
+    getRecentProxyLogs: async () => [...proxyLogRing],
+    onProxyLog: on('proxyLog'),
 
     // The browser preview has no real OS window chrome to control.
     windowMinimize: () => {},

@@ -36,6 +36,18 @@ contextBridge.exposeInMainWorld('soul', {
   importBackup: () => ipcRenderer.invoke('app:importBackup'),
   saveImage: (dataUrl, defaultName) => ipcRenderer.invoke('app:saveImage', { dataUrl, defaultName }),
   copyImage: (dataUrl) => ipcRenderer.invoke('app:copyImage', dataUrl),
+
+  openProxyFolder: () => ipcRenderer.invoke('app:openProxyFolder'),
+  systemProxyEnable: () => ipcRenderer.invoke('systemProxy:enable'),
+  systemProxyDisable: () => ipcRenderer.invoke('systemProxy:disable'),
+  testProxyConnection: (protocol) => ipcRenderer.invoke('network:testConnection', { protocol }),
+  resetNetworkDefaults: () => ipcRenderer.invoke('network:resetDefaults'),
+  getRecentProxyLogs: () => ipcRenderer.invoke('network:getRecentLogs'),
+  onProxyLog: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('proxy-log', handler);
+    return () => ipcRenderer.removeListener('proxy-log', handler);
+  },
   resetUsage: (id) => ipcRenderer.invoke('profiles:resetUsage', id),
   resetAllUsage: () => ipcRenderer.invoke('profiles:resetAllUsage'),
 
