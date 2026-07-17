@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld('soul', {
     ipcRenderer.on('state-changed', handler);
     return () => ipcRenderer.removeListener('state-changed', handler);
   },
+  addCustomConfig: (fields) => ipcRenderer.invoke('profiles:addCustom', fields),
   onLatencyUpdate: (callback) => {
     const handler = (_e, payload) => callback(payload);
     ipcRenderer.on('latency-update', handler);

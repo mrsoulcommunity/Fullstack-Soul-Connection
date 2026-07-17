@@ -2,7 +2,11 @@
 // in a plain browser via `vite` without Electron. Never bundled into the app:
 // main.jsx only imports it when import.meta.env.DEV && !window.soul.
 
-const profiles = [
+// `let`, not `const`: addCustomConfig below must REPLACE this with a new
+// array reference (not push() in place) so React's reference-equality check
+// on setProfiles() actually sees a change -- mirroring how a real IPC call
+// always hands the renderer a freshly-cloned array, never the same object.
+let profiles = [
   { id: 'p1', name: 'Tokyo — NTT Premium', address: 'jp1.soulnet.dev', port: 443, protocol: 'vless', network: 'ws', security: 'tls', subId: 's1', totalBytes: 4.2e9, favorite: true, lastUsedAt: Date.now() - 3600e3, link: 'vless://uuid-p1@jp1.soulnet.dev:443?type=ws&security=tls#Tokyo-NTT-Premium' },
   { id: 'p2', name: 'Frankfurt — Hetzner', address: 'de2.soulnet.dev', port: 8443, protocol: 'vmess', network: 'ws', security: 'tls', subId: 's1', totalBytes: 1.1e9, link: 'vmess://eyJhZGQiOiJkZTIuc291bG5ldC5kZXYiLCJwb3J0Ijo4NDQzfQ==' },
   { id: 'p3', name: 'Helsinki — Reality', address: 'fi1.soulnet.dev', port: 443, protocol: 'vless', network: 'tcp', security: 'reality', subId: 's1', totalBytes: 0, link: 'vless://uuid-p3@fi1.soulnet.dev:443?type=tcp&security=reality#Helsinki-Reality' },
@@ -26,6 +30,7 @@ const DEFAULT_SETTINGS = {
   restorePreviousSession: false,
   minimizeToTray: true,
   autoReconnect: true,
+  killSwitchEnabled: false,
   subAutoUpdateInterval: 0,
   xrayLogLevel: 'warning',
   socksPort: 10808,
@@ -47,7 +52,9 @@ export function installDevMock() {
     connectionMode: 'proxy',
     connectionState: 'disconnected',
     connectedAt: null,
+    killSwitchBlocking: false,
   };
+  let killSwitchArmed = false;
   const listeners = { state: [], latency: [], traffic: [], profiles: [], settings: [], updater: [], test: [], proxyLog: [] };
   const cancelled = new Set();
   let proxyLogRing = [];
@@ -126,6 +133,10 @@ export function installDevMock() {
       emitState();
       await new Promise((r) => setTimeout(r, 1400));
       state = { ...state, connectionState: 'connected', connectedAt: Date.now() };
+      if (settings.killSwitchEnabled) {
+        killSwitchArmed = true;
+        state = { ...state, killSwitchBlocking: false };
+      }
       emitState();
       startTelemetry();
     },
@@ -138,6 +149,10 @@ export function installDevMock() {
       // proxy left as the active system proxy would break the user's internet.
       systemProxyEnabled = false;
       state = { ...state, connectionState: 'disconnected', connectedAt: null };
+      // Mirrors the real Kill Switch: any disconnect while armed blocks traffic.
+      if (killSwitchArmed && settings.killSwitchEnabled) {
+        state = { ...state, killSwitchBlocking: true };
+      }
       emitState();
     },
     setMode: async (mode) => { state = { ...state, connectionMode: mode }; },
@@ -148,8 +163,35 @@ export function installDevMock() {
     },
     addLink: async () => { throw new Error('در حالت پیش‌نمایش در دسترس نیست'); },
     addSubscription: async () => { throw new Error('در حالت پیش‌نمایش در دسترس نیست'); },
-    refreshSubscription: async () => ({ profiles: [] }),
-    refreshAllSubscriptions: async () => {},
+    addCustomConfig: async (fields) => {
+      await new Promise((r) => setTimeout(r, 300));
+      if (!fields.address?.trim()) throw new Error('آدرس سرور را وارد کن');
+      const port = Number(fields.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('پورت باید بین ۱ تا ۶۵۵۳۵ باشد');
+      if ((fields.protocol === 'vmess' || fields.protocol === 'vless') && !/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(fields.uuid || '')) {
+        throw new Error('UUID نامعتبر است (فرمت: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)');
+      }
+      if ((fields.protocol === 'trojan' || fields.protocol === 'shadowsocks') && !fields.password?.trim()) {
+        throw new Error('رمز عبور را وارد کن');
+      }
+      const profile = {
+        id: `custom-${Date.now()}`,
+        protocol: fields.protocol,
+        name: fields.name?.trim() || `${fields.address}:${port}`,
+        address: fields.address.trim(),
+        port,
+        network: fields.network || 'tcp',
+        security: fields.security || 'none',
+        link: `${fields.protocol}://preview-custom@${fields.address}:${port}`,
+        subId: null,
+        totalBytes: 0,
+        createdAt: Date.now(),
+      };
+      profiles = [...profiles, profile];
+      return profile;
+    },
+    refreshSubscription: async () => { await new Promise((r) => setTimeout(r, 900)); return { profiles: [] }; },
+    refreshAllSubscriptions: async () => { await new Promise((r) => setTimeout(r, 900)); },
     deleteSubscription: async () => profiles,
     deleteProfile: async (id) => profiles.filter((p) => p.id !== id),
     renameProfile: async (id, name) => {
@@ -165,6 +207,15 @@ export function installDevMock() {
     },
     updateSettings: async (patch) => {
       settings = { ...settings, ...patch };
+      if ('killSwitchEnabled' in patch) {
+        if (patch.killSwitchEnabled) {
+          if (state.connectionState === 'connected') killSwitchArmed = true;
+        } else {
+          killSwitchArmed = false;
+          state = { ...state, killSwitchBlocking: false };
+          emitState();
+        }
+      }
       return { ...settings };
     },
     exportBackup: async () => ({ canceled: true }),

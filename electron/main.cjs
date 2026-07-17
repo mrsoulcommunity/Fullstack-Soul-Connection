@@ -3,10 +3,11 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notificatio
 const path = require('path');
 const fs = require('fs');
 
-const { parseLink, parseMany, newId, parseSubscriptionUserinfo } = require('./lib/parsers.cjs');
+const { parseLink, parseMany, newId, parseSubscriptionUserinfo, buildCustomProfile } = require('./lib/parsers.cjs');
 const { buildXrayConfig } = require('./lib/xrayConfig.cjs');
 const { XrayProcess } = require('./lib/xrayProcess.cjs');
 const systemProxy = require('./lib/systemProxy.cjs');
+const killSwitch = require('./lib/killSwitch.cjs');
 const { tcpPing } = require('./lib/pingTest.cjs');
 const { proxyPing } = require('./lib/proxyPing.cjs');
 const serverTest = require('./lib/serverTest.cjs');
@@ -32,6 +33,7 @@ const DEFAULT_SETTINGS = {
   restorePreviousSession: false, // renderer-owned UI state; main just persists/exposes it
   minimizeToTray: true,
   autoReconnect: true,
+  killSwitchEnabled: false,
   subAutoUpdateInterval: 0, // ms; 0 = off
   xrayLogLevel: 'warning',
   socksPort: SOCKS_PORT, // preferred; auto-bumped to the next free port if taken
@@ -91,6 +93,14 @@ let tray = null;
 let isQuitting = false;
 let expectedExit = false;
 let reconnectAttempts = 0;
+// Kill Switch: `killSwitchBlocking` mirrors whether the outbound-block
+// firewall rules are actually in place right now; `killSwitchArmed` tracks
+// whether we've had at least one successful tunnel this run (or the user
+// just turned the feature on while already connected) -- until armed, a
+// disconnect is not "the VPN dropping", it's just "never connected yet",
+// so it must not trigger a block.
+let killSwitchBlocking = false;
+let killSwitchArmed = false;
 let latencyTimer = null;
 let latencyPollInFlight = false;
 let trafficTimer = null;
@@ -147,6 +157,7 @@ function sendState() {
       activeProfileId: store.get('activeProfileId', null),
       connectedAt,
       systemProxyEnabled: store.get('systemProxyEnabled', false),
+      killSwitchBlocking,
     });
   }
   updateTray();
@@ -393,6 +404,9 @@ function findProfile(id) {
 async function connect(profileId) {
   const profile = findProfile(profileId);
   if (!profile) throw new Error('کانفیگ پیدا نشد');
+  if (!fs.existsSync(xrayBin)) {
+    throw new Error('فایل xray.exe پیدا نشد. احتمالاً آنتی‌ویروس آن را حذف یا قرنطینه کرده. لطفاً پوشه‌ی برنامه را به لیست استثناهای آنتی‌ویروس اضافه کن و برنامه را دوباره نصب/اجرا کن.');
+  }
   if (connectionState === 'connected' || connectionState === 'connecting') {
     await disconnect();
   }
@@ -429,6 +443,10 @@ async function connect(profileId) {
     connectionState = 'connected';
     sendState();
     notify('Soul Connection', `به «${profile.name}» متصل شدی`);
+    if (getSettings().killSwitchEnabled) {
+      killSwitchArmed = true;
+      await clearKillSwitchBlock();
+    }
   } catch (err) {
     connectionState = 'disconnected';
     currentPorts = null;
@@ -436,6 +454,9 @@ async function connect(profileId) {
     sendState();
     if (mode === 'tun' && /access is denied/i.test(err.message || '')) {
       throw new Error('حالت تانل نیاز به اجرای برنامه با دسترسی مدیر (Administrator) دارد');
+    }
+    if (err.code === 'ENOENT') {
+      throw new Error('فایل xray.exe پیدا نشد. احتمالاً آنتی‌ویروس آن را حذف یا قرنطینه کرده. لطفاً پوشه‌ی برنامه را به لیست استثناهای آنتی‌ویروس اضافه کن و برنامه را دوباره نصب/اجرا کن.');
     }
     throw err;
   }
@@ -451,6 +472,30 @@ async function disableSystemProxySafetyNet() {
   store.set('systemProxyEnabled', false);
 }
 
+// Engages the outbound-block firewall rules. Idempotent and best-effort --
+// if it fails (most likely: not actually elevated), we surface a notification
+// but must not claim protection we don't have, so killSwitchBlocking stays false.
+async function applyKillSwitchBlock() {
+  if (killSwitchBlocking) return;
+  try {
+    await killSwitch.enable(xrayBin);
+    killSwitchBlocking = true;
+  } catch (err) {
+    notify('خطا در Kill Switch', 'مسدودسازی ترافیک ناموفق بود: ' + (err.message || ''));
+  }
+  sendState();
+}
+
+// Lifts the block. Always safe to call even if nothing is currently
+// blocking -- this is also the emergency escape hatch invoked the moment
+// the user flips the setting off.
+async function clearKillSwitchBlock() {
+  if (!killSwitchBlocking) return;
+  try { await killSwitch.disable(); } catch { /* best effort */ }
+  killSwitchBlocking = false;
+  sendState();
+}
+
 async function disconnect() {
   if (connectionState === 'disconnected') return;
   connectionState = 'disconnecting';
@@ -463,6 +508,11 @@ async function disconnect() {
   currentPorts = null;
   connectedAt = null;
   sendState();
+  // Kill Switch means "no traffic outside the tunnel, for any reason" --
+  // that includes the user's own deliberate disconnect, not just drops.
+  if (killSwitchArmed && getSettings().killSwitchEnabled) {
+    await applyKillSwitchBlock();
+  }
 }
 
 // Detects the tunnel dropping on its own (crash, server-side kick, network
@@ -476,6 +526,15 @@ xray.on('exit', async () => {
   currentPorts = null;
   connectedAt = null;
   sendState();
+
+  const killSwitchSettings = getSettings();
+  if (killSwitchArmed && killSwitchSettings.killSwitchEnabled) {
+    // Block immediately -- before any reconnect attempt -- so the gap while
+    // we're retrying (which can take several seconds) never leaks traffic.
+    // A successful reconnect (below, or a later retry) lifts it again via
+    // connect()'s own success path.
+    await applyKillSwitchBlock();
+  }
 
   if (!getSettings().autoReconnect) {
     await disableSystemProxySafetyNet();
@@ -535,6 +594,21 @@ app.whenReady().then(async () => {
   app.setLoginItemSettings({ openAtLogin: !!settings.launchOnStartup });
   scheduleSubAutoUpdate();
 
+  // Sync in-memory Kill Switch state with whatever's actually on the
+  // firewall right now. If the feature is off, proactively clean up any
+  // rule left behind by a previous crash -- the stored preference is the
+  // source of truth for whether blocking *should* be happening. If it's on,
+  // leave a lingering block exactly as-is: that's the previous session's
+  // protection still doing its job until the user reconnects or disables it.
+  if (!settings.killSwitchEnabled) {
+    killSwitch.disable().catch(() => {});
+  } else {
+    killSwitch.isActive().then((active) => {
+      killSwitchBlocking = active;
+      sendState();
+    }).catch(() => {});
+  }
+
   if (settings.runLocalProxyOnStartup) {
     const profileId = store.get('activeProfileId');
     if (profileId && findProfile(profileId)) {
@@ -592,6 +666,7 @@ ipcMain.handle('profiles:list', () => ({
   connectedAt,
   settings: getSettings(),
   systemProxyEnabled: store.get('systemProxyEnabled', false),
+  killSwitchBlocking,
 }));
 
 ipcMain.handle('settings:setMode', async (_e, mode) => {
@@ -614,6 +689,14 @@ ipcMain.handle('settings:setMode', async (_e, mode) => {
 ipcMain.handle('profiles:addLink', (_e, link) => {
   const profile = parseLink(link);
   if (!profile) throw new Error('کانفیگ نامعتبر است یا پشتیبانی نمی‌شود');
+  const profiles = store.get('profiles', []);
+  profiles.push(profile);
+  store.set('profiles', profiles);
+  return profile;
+});
+
+ipcMain.handle('profiles:addCustom', (_e, fields) => {
+  const profile = buildCustomProfile(fields);
   const profiles = store.get('profiles', []);
   profiles.push(profile);
   store.set('profiles', profiles);
@@ -767,6 +850,7 @@ ipcMain.handle('connection:disconnect', async () => {
 ipcMain.handle('connection:status', () => ({
   connectionState,
   activeProfileId: store.get('activeProfileId', null),
+  killSwitchBlocking,
 }));
 
 ipcMain.handle('ping:test', async (_e, profileId) => {
@@ -850,7 +934,7 @@ ipcMain.handle('settings:get', () => getSettings());
 const LOG_LEVELS = new Set(['none', 'error', 'warning', 'info', 'debug']);
 const BOOLEAN_SETTINGS = new Set([
   'launchOnStartup', 'runLocalProxyOnStartup', 'startMinimized', 'restorePreviousSession',
-  'minimizeToTray', 'autoReconnect',
+  'minimizeToTray', 'autoReconnect', 'killSwitchEnabled',
 ]);
 const PORT_SETTINGS = new Set(['socksPort', 'httpPort']);
 const HOST_SETTINGS = new Set(['socksHost', 'httpHost']);
@@ -867,7 +951,7 @@ function isValidHost(v) {
   return HOSTNAME_RE.test(v);
 }
 
-ipcMain.handle('settings:update', (_e, patch) => {
+ipcMain.handle('settings:update', async (_e, patch) => {
   const allowed = new Set(Object.keys(DEFAULT_SETTINGS));
   const clean = {};
   for (const key of Object.keys(patch || {})) {
@@ -895,6 +979,28 @@ ipcMain.handle('settings:update', (_e, patch) => {
     const prospective = { ...getSettings(), ...clean };
     if (prospective.socksPort === prospective.httpPort) {
       throw new Error('پورت SOCKS و HTTP باید متفاوت باشند');
+    }
+  }
+
+  if ('killSwitchEnabled' in clean) {
+    if (clean.killSwitchEnabled) {
+      if (!(await isElevated())) {
+        notify('اجرای مجدد با دسترسی مدیر', 'Kill Switch نیاز به دسترسی مدیر دارد. برنامه به‌زودی دوباره باز می‌شود…');
+        const relaunched = await relaunchElevated(app);
+        if (!relaunched) {
+          throw new Error('برای فعال‌سازی Kill Switch باید درخواست دسترسی مدیر (UAC) رو تایید کنی');
+        }
+        return; // unreachable in practice -- app.exit() fires inside relaunchElevated
+      }
+      // Already connected when the user turns this on: arm immediately so a
+      // drop later in *this* session is still caught, instead of waiting for
+      // the next successful connect() to set the flag.
+      if (connectionState === 'connected') killSwitchArmed = true;
+    } else {
+      // Turning it off is the emergency escape hatch -- always lift any
+      // active block right away, regardless of connection state.
+      await clearKillSwitchBlock();
+      killSwitchArmed = false;
     }
   }
 

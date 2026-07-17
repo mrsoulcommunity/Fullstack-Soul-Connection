@@ -237,9 +237,10 @@ button:disabled { cursor: default; }
   justify-content: center;
   color: var(--text-dim);
   flex-shrink: 0;
-  transition: border-color 0.15s, color 0.15s, background 0.15s;
+  transition: border-color 0.15s, color 0.15s, background 0.15s, transform 0.12s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .icon-btn:hover { border-color: var(--signal-dim); color: var(--text); }
+.icon-btn:active:not(:disabled) { transform: scale(0.92); }
 .icon-btn:disabled { opacity: 0.4; }
 .icon-btn:disabled:hover { border-color: var(--border); color: var(--text-dim); }
 .icon-btn.tall { width: 38px; height: 38px; }
@@ -504,9 +505,11 @@ button:disabled { cursor: default; }
   justify-content: center;
   border-radius: 6px;
   color: var(--text-faint);
-  transition: color 0.15s, background 0.15s;
+  transition: color 0.15s, background 0.15s, transform 0.12s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .group-action:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+.group-action:active:not(:disabled) { transform: scale(0.88); }
+.group-action:disabled { opacity: 0.5; }
 .group-action.danger:hover { color: var(--danger); background: rgba(239, 90, 111, 0.1); }
 
 .server-card {
@@ -857,6 +860,36 @@ button:disabled { cursor: default; }
   transition: background 0.3s;
 }
 .status-dot.connected { background: var(--signal); box-shadow: 0 0 8px var(--signal); }
+.status-dot.blocking { background: var(--danger); box-shadow: 0 0 8px var(--danger); animation: killswitch-pulse 1.4s ease-in-out infinite; }
+
+@keyframes killswitch-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.killswitch-active-label { display: flex; align-items: center; gap: 6px; }
+
+.killswitch-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 18px 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  background: rgba(239, 90, 111, 0.12);
+  border: 1px solid rgba(239, 90, 111, 0.4);
+  color: var(--text);
+  animation: killswitch-banner-in 0.25s cubic-bezier(0.3, 0, 0.2, 1);
+  flex-shrink: 0;
+}
+.killswitch-banner .icon { color: var(--danger); flex-shrink: 0; }
+.killswitch-banner-text { flex: 1; font-size: 12.5px; line-height: 1.5; }
+.killswitch-banner-btn { flex: none; padding: 7px 14px; font-size: 12px; }
+
+@keyframes killswitch-banner-in {
+  from { opacity: 0; transform: translateY(-6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
 .status-dot.connecting, .status-dot.disconnecting { background: var(--warn); animation: blink 1s ease-in-out infinite; }
 
 @keyframes blink { 50% { opacity: 0.3; } }
@@ -1073,6 +1106,69 @@ button:disabled { cursor: default; }
 .modal .field { margin-bottom: 10px; }
 .modal .field:last-of-type { margin-bottom: 0; }
 
+.modal.wide {
+  width: min(640px, calc(100vw - 80px));
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+}
+
+.custom-config-form {
+  overflow-y: auto;
+  padding-inline-end: 4px;
+  margin-inline-end: -4px;
+}
+
+.custom-form-group { margin-bottom: 16px; }
+.custom-form-group:last-of-type { margin-bottom: 0; }
+
+.custom-form-group-title {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--signal-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.custom-form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 12px;
+}
+
+.custom-field { min-width: 0; }
+.custom-field.span-2 { grid-column: 1 / -1; }
+.custom-field-hint { display: block; margin-top: 4px; }
+.custom-field .setting-select { width: 100%; }
+
+.custom-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12.5px;
+  color: var(--text-dim);
+  height: 100%;
+  padding-top: 6px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.custom-checkbox-row:hover { color: var(--text); }
+.custom-checkbox-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--signal);
+  cursor: pointer;
+  transition: transform 0.12s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.custom-checkbox-row input[type="checkbox"]:active {
+  transform: scale(0.88);
+}
+
+@media (max-width: 560px) {
+  .custom-form-grid { grid-template-columns: 1fr; }
+}
+
 .field-label {
   display: block;
   font-size: 11px;
@@ -1126,8 +1222,10 @@ button:disabled { cursor: default; }
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text-faint);
-  transition: color 0.15s, border-color 0.15s, background 0.15s;
+  transition: color 0.15s, border-color 0.15s, background 0.15s, transform 0.12s cubic-bezier(0.4, 0, 0.2, 1);
 }
+.tab:hover:not(.active) { color: var(--text-dim); border-color: #2b3247; }
+.tab:active { transform: scale(0.97); }
 .tab.active {
   color: var(--text);
   border-color: var(--signal-dim);
@@ -1142,15 +1240,16 @@ button:disabled { cursor: default; }
   background: var(--card);
   font-weight: 600;
   font-size: 12.5px;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color 0.15s, background 0.15s, transform 0.12s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.15s;
 }
-.btn:hover { border-color: #2b3247; }
+.btn:hover:not(:disabled) { border-color: #2b3247; }
+.btn:active:not(:disabled) { transform: scale(0.97); }
 .btn.primary {
   background: var(--signal);
   border-color: var(--signal);
   color: #06110e;
 }
-.btn.primary:hover { background: #4ce6c9; border-color: #4ce6c9; }
+.btn.primary:hover:not(:disabled) { background: #4ce6c9; border-color: #4ce6c9; }
 .btn.primary:disabled {
   opacity: 0.5;
 }
@@ -1159,7 +1258,7 @@ button:disabled { cursor: default; }
   border-color: var(--danger);
   color: #2a0a0e;
 }
-.btn.danger:hover { background: #f3798c; border-color: #f3798c; }
+.btn.danger:hover:not(:disabled) { background: #f3798c; border-color: #f3798c; }
 
 .confirm-modal { text-align: center; }
 .confirm-icon {
@@ -1396,8 +1495,11 @@ button:disabled { cursor: default; }
   font-size: 12px;
   font-family: inherit;
   flex-shrink: 0;
+  transition: border-color 0.15s, background 0.15s;
 }
+.setting-select:hover:not(:disabled) { border-color: #2b3247; }
 .setting-select:focus { outline: none; border-color: var(--signal-dim); }
+.setting-select:active:not(:disabled) { background: var(--card); }
 
 .setting-select.port-input {
   width: 92px;
@@ -1430,8 +1532,10 @@ button:disabled { cursor: default; }
   border: 1px solid var(--border);
   background: var(--bg-panel);
   flex-shrink: 0;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.2s cubic-bezier(0.4, 0, 0.2, 1), border-color 0.2s cubic-bezier(0.4, 0, 0.2, 1), transform 0.12s cubic-bezier(0.4, 0, 0.2, 1);
 }
+.switch:hover:not(:disabled) { border-color: #2b3247; }
+.switch:active:not(:disabled) { transform: scale(0.94); }
 
 .switch .knob {
   position: absolute;
@@ -1441,13 +1545,14 @@ button:disabled { cursor: default; }
   height: 18px;
   border-radius: 50%;
   background: var(--text-faint);
-  transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1), background 0.15s;
+  transition: transform 0.2s cubic-bezier(0.4, 0, 0.2, 1), background 0.2s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .switch.on {
   background: rgba(53, 224, 192, 0.16);
   border-color: var(--signal-dim);
 }
+.switch.on:hover:not(:disabled) { border-color: var(--signal); }
 .switch.on .knob {
   background: var(--signal);
   transform: translateX(-16px);
@@ -1514,9 +1619,10 @@ button:disabled { cursor: default; }
   top: 50%;
   transform: translateY(-50%);
   color: var(--text-faint);
-  transition: color 0.15s;
+  transition: color 0.15s, transform 0.12s cubic-bezier(0.4, 0, 0.2, 1);
 }
 .password-toggle:hover { color: var(--text-dim); }
+.password-toggle:active { transform: translateY(-50%) scale(0.85); }
 
 /* ================= Server Finder ================= */
 .finder-overlay {
@@ -2049,6 +2155,17 @@ kbd {
 }
 
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.icon-spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top-color: currentColor;
+  animation: spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
 
 .fcard-fail {
   font-size: 10.5px;
@@ -2778,4 +2895,12 @@ kbd {
   .dash-scroll { scroll-behavior: auto; }
   .qr-card, .qr-state { animation: none; }
   .qr-spinner { animation-duration: 1.4s; }
+  .icon-spinner { animation-duration: 1.4s; }
+  .status-dot.blocking { animation: none; }
+  .killswitch-banner { animation: none; }
+  .btn:active:not(:disabled), .icon-btn:active:not(:disabled), .tab:active,
+  .switch:active:not(:disabled), .group-action:active:not(:disabled),
+  .password-toggle:active, .custom-checkbox-row input[type="checkbox"]:active {
+    transform: none;
+  }
 }

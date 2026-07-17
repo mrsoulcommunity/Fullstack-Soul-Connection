@@ -74,9 +74,11 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [busy, setBusy] = useState(false);
   const [updatingSubs, setUpdatingSubs] = useState(false);
+  const [refreshingSubIds, setRefreshingSubIds] = useState(() => new Set());
   const [finderOpen, setFinderOpen] = useState(false);
   const [windowMaximized, setWindowMaximized] = useState(false);
   const [systemProxyEnabled, setSystemProxyEnabled] = useState(false);
+  const [killSwitchBlocking, setKillSwitchBlocking] = useState(false);
 
   useEffect(() => {
     window.soul.windowIsMaximized?.().then(setWindowMaximized).catch(() => {});
@@ -94,6 +96,7 @@ export default function App() {
     setConnectedAt(data.connectedAt);
     setSettings(data.settings);
     setSystemProxyEnabled(data.systemProxyEnabled);
+    setKillSwitchBlocking(!!data.killSwitchBlocking);
   }, []);
 
   // Ctrl+K (or Ctrl+F) opens the server finder from anywhere.
@@ -151,11 +154,12 @@ export default function App() {
   useEffect(() => {
     refresh();
     window.soul.getAppInfo().then(setAppInfo).catch(() => {});
-    const offState = window.soul.onStateChanged(({ connectionState, activeProfileId, connectedAt, systemProxyEnabled }) => {
+    const offState = window.soul.onStateChanged(({ connectionState, activeProfileId, connectedAt, systemProxyEnabled, killSwitchBlocking }) => {
       setConnectionState(connectionState);
       setActiveProfileId(activeProfileId);
       setConnectedAt(connectedAt);
       setSystemProxyEnabled(systemProxyEnabled);
+      setKillSwitchBlocking(!!killSwitchBlocking);
       if (connectionState !== 'connected') {
         setLatencyMs(null);
         setTraffic(null);
@@ -302,11 +306,11 @@ export default function App() {
   }, [showToast]);
 
   const handleAddLink = useCallback(async (link) => {
-    const profile = await window.soul.addLink(link);
-    setProfiles((p) => [...p, profile]);
+    await window.soul.addLink(link);
+    await refresh();
     setShowAdd(false);
     showToast('کانفیگ اضافه شد');
-  }, [showToast]);
+  }, [refresh, showToast]);
 
   const handleAddSubscription = useCallback(async (url) => {
     const { profiles: added } = await window.soul.addSubscription(url);
@@ -315,15 +319,30 @@ export default function App() {
     showToast(`${added.length} کانفیگ از ساب‌اسکریپشن اضافه شد`);
   }, [refresh, showToast]);
 
+  const handleAddCustom = useCallback(async (fields) => {
+    await window.soul.addCustomConfig(fields);
+    await refresh();
+    setShowAdd(false);
+    showToast('کانفیگ اضافه شد');
+  }, [refresh, showToast]);
+
   const handleRefreshSubscription = useCallback(async (id) => {
+    if (refreshingSubIds.has(id)) return; // already refreshing -- ignore repeat clicks
+    setRefreshingSubIds((prev) => new Set(prev).add(id));
     try {
       const { profiles: added } = await window.soul.refreshSubscription(id);
       await refresh();
       showToast(`${added.length} کانفیگ به‌روزرسانی شد`);
     } catch (err) {
       showToast(err.message || 'خطا در به‌روزرسانی');
+    } finally {
+      setRefreshingSubIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
-  }, [refresh, showToast]);
+  }, [refresh, showToast, refreshingSubIds]);
 
   const handleUpdateAllSubscriptions = useCallback(async () => {
     if (updatingSubs) return;
@@ -436,6 +455,17 @@ export default function App() {
 
   const handleOpenProxyFolder = useCallback(() => window.soul.openProxyFolder(), []);
 
+  const handleEmergencyDisableKillSwitch = useCallback(async () => {
+    try {
+      const updated = await window.soul.updateSettings({ killSwitchEnabled: false });
+      setSettings(updated);
+      setKillSwitchBlocking(false);
+      showToast('Kill Switch غیرفعال شد و اینترنت آزاد شد');
+    } catch (err) {
+      showToast(err.message || 'خطا در غیرفعال‌سازی Kill Switch', 'error');
+    }
+  }, [showToast]);
+
   const handleResetNetworkDefaults = useCallback(async () => {
     try {
       const updated = await window.soul.resetNetworkDefaults();
@@ -478,6 +508,7 @@ export default function App() {
             connectionState={connectionState}
             pings={pings}
             updatingSubs={updatingSubs}
+            refreshingSubIds={refreshingSubIds}
             onSelect={handleSelect}
             onDelete={handleDelete}
             onPing={handlePing}
@@ -559,8 +590,21 @@ export default function App() {
                   onSystemProxyDisable={handleSystemProxyDisable}
                   onOpenProxyFolder={handleOpenProxyFolder}
                   onResetNetworkDefaults={handleResetNetworkDefaults}
+                  killSwitchBlocking={killSwitchBlocking}
                 />
               )}
+            </div>
+          )}
+
+          {killSwitchBlocking && (
+            <div className="killswitch-banner" role="alert">
+              <Icon name="shield" size={16} />
+              <span className="killswitch-banner-text">
+                Kill Switch فعال است — تمام ترافیک اینترنت مسدود شده تا وقتی دوباره وصل شوی.
+              </span>
+              <button className="btn danger killswitch-banner-btn" onClick={handleEmergencyDisableKillSwitch}>
+                غیرفعال‌سازی اضطراری
+              </button>
             </div>
           )}
 
@@ -593,6 +637,7 @@ export default function App() {
           onClose={() => setShowAdd(false)}
           onAddLink={handleAddLink}
           onAddSubscription={handleAddSubscription}
+          onAddCustom={handleAddCustom}
         />
       )}
     </div>

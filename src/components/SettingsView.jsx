@@ -35,6 +35,7 @@ export default function SettingsView({
   onUpdate, onUpdateChecked, onOpenLogsFolder,
   onExportBackup, onImportBackup, onResetUsage, onResetAllUsage,
   onSystemProxyEnable, onSystemProxyDisable, onOpenProxyFolder, onResetNetworkDefaults,
+  killSwitchBlocking,
 }) {
   const portsLocked = connectionState !== 'disconnected';
   const totalUsage = (profiles || []).reduce((sum, p) => sum + (p.totalBytes || 0), 0);
@@ -101,6 +102,7 @@ export default function SettingsView({
         settings={settings}
         connectionState={connectionState}
         systemProxyEnabled={systemProxyEnabled}
+        killSwitchBlocking={killSwitchBlocking}
         onUpdate={onUpdate}
         onUpdateChecked={onUpdateChecked}
         onSystemProxyEnable={onSystemProxyEnable}

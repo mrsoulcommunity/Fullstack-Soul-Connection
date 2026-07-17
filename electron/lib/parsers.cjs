@@ -223,4 +223,192 @@ function parseSubscriptionUserinfo(headerValue) {
   };
 }
 
-module.exports = { parseLink, parseMany, newId, parseSubscriptionUserinfo };
+// ---- Custom config: build a share-link back out of a profile object ----
+// The reverse of fillFromQuery()/parseVmess() etc. -- lets a manually-built
+// (Custom tab) profile carry a real `link`, so copy/QR/edit-via-link keep
+// working on it exactly like on any imported profile. Field/default choices
+// mirror the parse side field-for-field so a build->parse round trip is a no-op.
+
+function qs(pairs) {
+  const parts = [];
+  for (const [k, v] of pairs) {
+    if (v === undefined || v === null || v === '' || v === false) continue;
+    parts.push(`${k}=${encodeURIComponent(v)}`);
+  }
+  return parts.length ? `?${parts.join('&')}` : '';
+}
+
+function streamQueryPairs(p) {
+  return [
+    ['type', p.network && p.network !== 'tcp' ? p.network : undefined],
+    ['sni', p.sni || undefined],
+    ['alpn', p.alpn || undefined],
+    ['fp', p.fingerprint || undefined],
+    ['host', p.host || undefined],
+    ['path', p.path || undefined],
+    ['headerType', p.headerType && p.headerType !== 'none' ? p.headerType : undefined],
+    ['serviceName', p.serviceName || undefined],
+    ['mode', p.mode || undefined],
+    ['allowInsecure', p.allowInsecure ? '1' : undefined],
+    ['pbk', p.publicKey || undefined],
+    ['sid', p.shortId || undefined],
+    ['spx', p.spiderX || undefined],
+  ];
+}
+
+function buildVmessLink(p) {
+  const obj = {
+    v: '2',
+    ps: p.name || '',
+    add: p.address,
+    port: p.port,
+    id: p.uuid,
+    aid: p.alterId || 0,
+    scy: p.scy || 'auto',
+    net: p.network || 'tcp',
+    type: p.headerType || 'none',
+    host: p.host || '',
+    path: p.path || '',
+    tls: p.security === 'tls' ? 'tls' : '',
+    sni: p.sni || '',
+    alpn: p.alpn || '',
+    fp: p.fingerprint || '',
+  };
+  return `vmess://${Buffer.from(JSON.stringify(obj), 'utf8').toString('base64')}`;
+}
+
+function buildVlessLink(p) {
+  const pairs = streamQueryPairs(p);
+  pairs.push(['security', p.security && p.security !== 'none' ? p.security : undefined]);
+  pairs.push(['flow', p.flow || undefined]);
+  pairs.push(['encryption', p.encryption && p.encryption !== 'none' ? p.encryption : undefined]);
+  const name = encodeURIComponent(p.name || '');
+  return `vless://${encodeURIComponent(p.uuid)}@${p.address}:${p.port}${qs(pairs)}#${name}`;
+}
+
+function buildTrojanLink(p) {
+  const pairs = streamQueryPairs(p);
+  // Unlike vless, parseTrojan forces security back to 'tls' whenever the
+  // query has no explicit `security` param -- always spell it out here so a
+  // deliberately-chosen 'none'/'reality' isn't silently overwritten on reparse.
+  pairs.push(['security', p.security || 'tls']);
+  const name = encodeURIComponent(p.name || '');
+  return `trojan://${encodeURIComponent(p.password)}@${p.address}:${p.port}${qs(pairs)}#${name}`;
+}
+
+function buildSsLink(p) {
+  const userinfo = b64UrlEncode(`${p.method}:${p.password}`);
+  const name = encodeURIComponent(p.name || '');
+  return `ss://${userinfo}@${p.address}:${p.port}#${name}`;
+}
+
+function b64UrlEncode(s) {
+  return Buffer.from(s, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function buildLink(p) {
+  switch (p.protocol) {
+    case 'vmess': return buildVmessLink(p);
+    case 'vless': return buildVlessLink(p);
+    case 'trojan': return buildTrojanLink(p);
+    case 'shadowsocks': return buildSsLink(p);
+    default: return null;
+  }
+}
+
+// ---- Custom config: validate manual form input into a full profile ----
+
+const CUSTOM_PROTOCOLS = new Set(['vmess', 'vless', 'trojan', 'shadowsocks']);
+const CUSTOM_NETWORKS = new Set(['tcp', 'ws', 'grpc', 'h2', 'http', 'kcp']);
+const CUSTOM_SECURITIES = new Set(['none', 'tls', 'reality']);
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+const SS_METHODS = new Set([
+  'aes-128-gcm', 'aes-192-gcm', 'aes-256-gcm',
+  'chacha20-ietf-poly1305', 'chacha20-poly1305', 'xchacha20-ietf-poly1305',
+  '2022-blake3-aes-128-gcm', '2022-blake3-aes-256-gcm', '2022-blake3-chacha20-poly1305',
+  'none', 'plain',
+]);
+
+function str(v, max = 256) {
+  if (v === undefined || v === null) return '';
+  const s = String(v).trim();
+  return s.length > max ? s.slice(0, max) : s;
+}
+
+function buildCustomProfile(fields) {
+  const f = fields || {};
+  const protocol = str(f.protocol);
+  if (!CUSTOM_PROTOCOLS.has(protocol)) throw new Error('پروتکل نامعتبر است');
+
+  const address = str(f.address, 253);
+  if (!address) throw new Error('آدرس سرور را وارد کن');
+
+  const port = Number(f.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('پورت باید بین ۱ تا ۶۵۵۳۵ باشد');
+
+  const network = str(f.network) || 'tcp';
+  if (!CUSTOM_NETWORKS.has(network)) throw new Error('نوع شبکه نامعتبر است');
+
+  let security = str(f.security) || 'none';
+  if (!CUSTOM_SECURITIES.has(security)) throw new Error('نوع امنیت نامعتبر است');
+  if (protocol === 'vmess' && security === 'reality') security = 'tls'; // vmess has no Reality support
+
+  const p = baseProfile(protocol, null);
+  p.name = str(f.name, 100);
+  p.address = address;
+  p.port = port;
+  p.network = network;
+  p.security = security;
+  p.sni = str(f.sni, 253);
+  p.alpn = str(f.alpn, 128);
+  p.fingerprint = str(f.fingerprint, 32);
+  p.allowInsecure = !!f.allowInsecure;
+  p.host = str(f.host, 253);
+  p.path = str(f.path, 512);
+  p.headerType = str(f.headerType) || 'none';
+  p.serviceName = str(f.serviceName, 256);
+  p.mode = str(f.mode, 32);
+  p.publicKey = str(f.publicKey, 128);
+  p.shortId = str(f.shortId, 32);
+  p.spiderX = str(f.spiderX, 256);
+
+  if (protocol === 'vmess' || protocol === 'vless') {
+    const uuid = str(f.uuid);
+    if (!UUID_RE.test(uuid)) throw new Error('UUID نامعتبر است (فرمت صحیح: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)');
+    p.uuid = uuid;
+  }
+  if (protocol === 'vmess') {
+    const alterId = Number(f.alterId);
+    p.alterId = Number.isInteger(alterId) && alterId >= 0 ? alterId : 0;
+    p.scy = str(f.scy) || 'auto';
+  }
+  if (protocol === 'vless') {
+    p.flow = str(f.flow);
+    p.encryption = str(f.encryption) || 'none';
+  }
+  if (protocol === 'trojan') {
+    const password = str(f.password, 256);
+    if (!password) throw new Error('رمز عبور را وارد کن');
+    p.password = password;
+    if (!f.security) p.security = 'tls'; // matches parseTrojan's own forced default
+  }
+  if (protocol === 'shadowsocks') {
+    const method = str(f.method);
+    if (!SS_METHODS.has(method)) throw new Error('روش رمزنگاری نامعتبر است');
+    const password = str(f.password, 256);
+    if (!password) throw new Error('رمز عبور را وارد کن');
+    p.method = method;
+    p.password = password;
+    p.network = 'tcp';
+    p.security = 'none';
+  }
+
+  if (!p.name) p.name = `${p.address}:${p.port}`;
+  p.link = buildLink(p);
+  return p;
+}
+
+module.exports = {
+  parseLink, parseMany, newId, parseSubscriptionUserinfo,
+  buildLink, buildCustomProfile,
+};

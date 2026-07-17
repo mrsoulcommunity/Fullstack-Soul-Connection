@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import Icon from './Icon.jsx';
-import { Section, TextField, PasswordField, PortField, BypassField, isValidHost } from './settingsPrimitives.jsx';
+import { Section, Toggle, TextField, PasswordField, PortField, BypassField, isValidHost } from './settingsPrimitives.jsx';
 import { ConfirmModal } from './ManageModals.jsx';
 
 const PROTO_DEFAULTS = {
@@ -43,7 +43,7 @@ function ProxyLogFeed({ logs }) {
 }
 
 export default function NetworkSettings({
-  settings, connectionState, systemProxyEnabled,
+  settings, connectionState, systemProxyEnabled, killSwitchBlocking,
   onUpdate, onUpdateChecked, onSystemProxyEnable, onSystemProxyDisable, onOpenProxyFolder, onResetNetworkDefaults,
 }) {
   const [proto, setProto] = useState('socks');
@@ -99,6 +99,32 @@ export default function NetworkSettings({
 
   return (
     <>
+      <Section
+        title="Kill Switch"
+        icon="shield"
+        description="جلوگیری کامل از نشت ترافیک هنگام قطع‌شدن VPN"
+      >
+        <Toggle
+          label="Kill Switch"
+          hint={killSwitchBlocking
+            ? 'فعال — در حال حاضر تمام ترافیک اینترنت مسدود است چون تونل وصل نیست'
+            : 'با قطع‌شدن ناگهانی اتصال، تغییر کانفیگ یا هر نوع افت اتصال، تمام ترافیک اینترنت سیستم مسدود می‌شود تا هیچ داده‌ای بیرون از تونل ارسال نشود؛ فعال‌سازی نیاز به دسترسی مدیر (UAC) دارد.'}
+          checked={!!settings.killSwitchEnabled}
+          onChange={(v) => onUpdate({ killSwitchEnabled: v })}
+        />
+        {killSwitchBlocking && (
+          <div className="setting-row">
+            <div className="setting-text">
+              <span className="setting-label killswitch-active-label">
+                <span className="status-dot blocking" />
+                در حال مسدودسازی ترافیک
+              </span>
+              <span className="setting-hint">برای بازگرداندن فوری اینترنت، Kill Switch را خاموش کن یا دوباره به یک سرور وصل شو.</span>
+            </div>
+          </div>
+        )}
+      </Section>
+
       <Section title="وضعیت شبکه" icon="signal" description="پروکسی محلی و پروکسی سیستم ویندوز">
         <div className="setting-row">
           <div className="setting-text">

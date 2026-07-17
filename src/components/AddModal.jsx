@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
+import CustomConfigForm from './CustomConfigForm.jsx';
 
-export default function AddModal({ onClose, onAddLink, onAddSubscription }) {
+export default function AddModal({ onClose, onAddLink, onAddSubscription, onAddCustom }) {
   const [tab, setTab] = useState('link');
   const [value, setValue] = useState('');
   const [error, setError] = useState('');
@@ -25,9 +26,13 @@ export default function AddModal({ onClose, onAddLink, onAddSubscription }) {
 
   return (
     <div className="overlay" onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className="modal">
+      <div className={`modal ${tab === 'custom' ? 'wide' : ''}`}>
         <h3>افزودن کانفیگ</h3>
-        <p className="hint">لینک vmess://, vless://, trojan:// یا ss:// یا یک آدرس ساب‌اسکریپشن وارد کن.</p>
+        <p className="hint">
+          {tab === 'custom'
+            ? 'تمام تنظیمات کانفیگ را به‌صورت دستی وارد کن.'
+            : 'لینک vmess://, vless://, trojan:// یا ss:// یا یک آدرس ساب‌اسکریپشن وارد کن.'}
+        </p>
 
         <div className="tabs">
           <button className={`tab ${tab === 'link' ? 'active' : ''}`} onClick={() => setTab('link')}>
@@ -36,34 +41,43 @@ export default function AddModal({ onClose, onAddLink, onAddSubscription }) {
           <button className={`tab ${tab === 'sub' ? 'active' : ''}`} onClick={() => setTab('sub')}>
             ساب‌اسکریپشن
           </button>
-        </div>
-
-        {tab === 'link' ? (
-          <textarea
-            className="mono"
-            placeholder="vmess://..."
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            autoFocus
-          />
-        ) : (
-          <input
-            className="mono"
-            placeholder="https://example.com/sub"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            autoFocus
-          />
-        )}
-
-        {error && <div className="error-msg">{error}</div>}
-
-        <div className="row">
-          <button className="btn" onClick={onClose}>انصراف</button>
-          <button className="btn primary" onClick={handleSubmit} disabled={loading || !value.trim()}>
-            {loading ? 'در حال افزودن…' : 'افزودن'}
+          <button className={`tab ${tab === 'custom' ? 'active' : ''}`} onClick={() => setTab('custom')}>
+            Custom
           </button>
         </div>
+
+        {tab === 'custom' ? (
+          <CustomConfigForm onSubmit={onAddCustom} onCancel={onClose} />
+        ) : (
+          <>
+            {tab === 'link' ? (
+              <textarea
+                className="mono"
+                placeholder="vmess://..."
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                autoFocus
+              />
+            ) : (
+              <input
+                className="mono"
+                placeholder="https://example.com/sub"
+                value={value}
+                onChange={(e) => setValue(e.target.value)}
+                autoFocus
+              />
+            )}
+
+            {error && <div className="error-msg">{error}</div>}
+
+            <div className="row">
+              <button className="btn" onClick={onClose}>انصراف</button>
+              <button className="btn primary" onClick={handleSubmit} disabled={loading || !value.trim()}>
+                {loading ? 'در حال افزودن…' : 'افزودن'}
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

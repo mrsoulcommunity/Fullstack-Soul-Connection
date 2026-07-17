@@ -61,7 +61,7 @@ const ServerCard = React.memo(function ServerCard({ profile, active, ms, onSelec
 });
 
 export default function ServerList({
-  profiles, subscriptions, activeProfileId, connectionState, pings, updatingSubs,
+  profiles, subscriptions, activeProfileId, connectionState, pings, updatingSubs, refreshingSubIds,
   onSelect, onDelete, onPing, onPingAll, onAdd,
   onRefreshSubscription, onUpdateAllSubscriptions, onDeleteSubscription,
   onConnectTo, onDisconnect, onRenameProfile, onEditProfile, onUpdateSubscription, onToast,
@@ -219,6 +219,7 @@ export default function ServerList({
 
       {subscriptions.length > 0 && (
         <button className="update-all-btn" onClick={onUpdateAllSubscriptions} disabled={updatingSubs}>
+          {updatingSubs && <span className="icon-spinner" aria-hidden="true" />}
           {updatingSubs ? 'در حال به‌روزرسانی…' : 'به‌روزرسانی همه‌ی ساب‌اسکریپشن‌ها'}
         </button>
       )}
@@ -256,8 +257,15 @@ export default function ServerList({
                   </button>
                   {!group.local && (
                     <>
-                      <button className="group-action" onClick={() => onRefreshSubscription(group.sub.id)} title="به‌روزرسانی">
-                        <Icon name="refresh" size={13} />
+                      <button
+                        className="group-action"
+                        onClick={() => onRefreshSubscription(group.sub.id)}
+                        disabled={refreshingSubIds?.has(group.sub.id)}
+                        title="به‌روزرسانی"
+                      >
+                        {refreshingSubIds?.has(group.sub.id)
+                          ? <span className="icon-spinner" aria-hidden="true" />
+                          : <Icon name="refresh" size={13} />}
                       </button>
                       <button className="group-action danger" onClick={() => requestDeleteSubscription(group.sub)} title="حذف ساب‌اسکریپشن">
                         <Icon name="close" size={13} />
