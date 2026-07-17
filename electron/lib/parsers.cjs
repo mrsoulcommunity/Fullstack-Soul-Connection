@@ -205,4 +205,22 @@ function parseMany(text) {
   return out;
 }
 
-module.exports = { parseLink, parseMany, newId };
+function parseSubscriptionUserinfo(headerValue) {
+  if (!headerValue) return null;
+  const out = {};
+  for (const part of headerValue.split(';')) {
+    const [key, val] = part.trim().split('=');
+    if (key && val !== undefined && !Number.isNaN(Number(val))) out[key.trim()] = Number(val);
+  }
+  if (out.upload === undefined && out.download === undefined && out.total === undefined && out.expire === undefined) {
+    return null;
+  }
+  return {
+    uploadBytes: out.upload || 0,
+    downloadBytes: out.download || 0,
+    totalBytes: out.total || 0,
+    expireAt: out.expire ? out.expire * 1000 : null,
+  };
+}
+
+module.exports = { parseLink, parseMany, newId, parseSubscriptionUserinfo };

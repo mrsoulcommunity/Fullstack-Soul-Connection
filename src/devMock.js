@@ -3,20 +3,20 @@
 // main.jsx only imports it when import.meta.env.DEV && !window.soul.
 
 const profiles = [
-  { id: 'p1', name: 'Tokyo — NTT Premium', address: 'jp1.soulnet.dev', port: 443, protocol: 'vless', network: 'ws', security: 'tls', subId: 's1', totalBytes: 4.2e9, favorite: true, lastUsedAt: Date.now() - 3600e3 },
-  { id: 'p2', name: 'Frankfurt — Hetzner', address: 'de2.soulnet.dev', port: 8443, protocol: 'vmess', network: 'ws', security: 'tls', subId: 's1', totalBytes: 1.1e9 },
-  { id: 'p3', name: 'Helsinki — Reality', address: 'fi1.soulnet.dev', port: 443, protocol: 'vless', network: 'tcp', security: 'reality', subId: 's1', totalBytes: 0 },
-  { id: 'p4', name: '🇵🇱 Warsaw — Trojan', address: 'pl3.soulnet.dev', port: 2053, protocol: 'trojan', network: 'grpc', security: 'tls', subId: 's2', totalBytes: 6.4e8 },
-  { id: 'p5', name: 'Istanbul — Direct', address: 'tr1.soulnet.dev', port: 443, protocol: 'shadowsocks', network: 'tcp', security: 'none', subId: 's2', totalBytes: 0 },
-  { id: 'p6', name: 'خانگی — سرور شخصی', address: '91.108.4.12', port: 8080, protocol: 'vless', network: 'ws', security: 'tls', subId: null, totalBytes: 2.3e10, favorite: true },
-  { id: 'p7', name: 'US Dallas — Reality', address: 'us4.soulnet.dev', port: 443, protocol: 'vless', network: 'tcp', security: 'reality', subId: 's1', totalBytes: 0 },
-  { id: 'p8', name: 'Amsterdam — WS CDN', address: 'nl1.soulnet.dev', port: 2087, protocol: 'vmess', network: 'ws', security: 'tls', subId: 's1', totalBytes: 3.1e8 },
-  { id: 'p9', name: 'Singapore — Edge', address: 'sg2.soulnet.dev', port: 443, protocol: 'trojan', network: 'ws', security: 'tls', subId: 's2', totalBytes: 0 },
+  { id: 'p1', name: 'Tokyo — NTT Premium', address: 'jp1.soulnet.dev', port: 443, protocol: 'vless', network: 'ws', security: 'tls', subId: 's1', totalBytes: 4.2e9, favorite: true, lastUsedAt: Date.now() - 3600e3, link: 'vless://uuid-p1@jp1.soulnet.dev:443?type=ws&security=tls#Tokyo-NTT-Premium' },
+  { id: 'p2', name: 'Frankfurt — Hetzner', address: 'de2.soulnet.dev', port: 8443, protocol: 'vmess', network: 'ws', security: 'tls', subId: 's1', totalBytes: 1.1e9, link: 'vmess://eyJhZGQiOiJkZTIuc291bG5ldC5kZXYiLCJwb3J0Ijo4NDQzfQ==' },
+  { id: 'p3', name: 'Helsinki — Reality', address: 'fi1.soulnet.dev', port: 443, protocol: 'vless', network: 'tcp', security: 'reality', subId: 's1', totalBytes: 0, link: 'vless://uuid-p3@fi1.soulnet.dev:443?type=tcp&security=reality#Helsinki-Reality' },
+  { id: 'p4', name: '🇵🇱 Warsaw — Trojan', address: 'pl3.soulnet.dev', port: 2053, protocol: 'trojan', network: 'grpc', security: 'tls', subId: 's2', totalBytes: 6.4e8, link: 'trojan://pass-p4@pl3.soulnet.dev:2053?type=grpc&security=tls#Warsaw-Trojan' },
+  { id: 'p5', name: 'Istanbul — Direct', address: 'tr1.soulnet.dev', port: 443, protocol: 'shadowsocks', network: 'tcp', security: 'none', subId: 's2', totalBytes: 0, link: 'ss://YWVzLTI1Ni1nY206cGFzcw==@tr1.soulnet.dev:443#Istanbul-Direct' },
+  { id: 'p6', name: 'خانگی — سرور شخصی', address: '91.108.4.12', port: 8080, protocol: 'vless', network: 'ws', security: 'tls', subId: null, totalBytes: 2.3e10, favorite: true, link: 'vless://uuid-p6@91.108.4.12:8080?type=ws&security=tls#خانگی' },
+  { id: 'p7', name: 'US Dallas — Reality', address: 'us4.soulnet.dev', port: 443, protocol: 'vless', network: 'tcp', security: 'reality', subId: 's1', totalBytes: 0, link: 'vless://uuid-p7@us4.soulnet.dev:443?type=tcp&security=reality#US-Dallas-Reality' },
+  { id: 'p8', name: 'Amsterdam — WS CDN', address: 'nl1.soulnet.dev', port: 2087, protocol: 'vmess', network: 'ws', security: 'tls', subId: 's1', totalBytes: 3.1e8, link: 'vmess://eyJhZGQiOiJubDEuc291bG5ldC5kZXYiLCJwb3J0IjoyMDg3fQ==' },
+  { id: 'p9', name: 'Singapore — Edge', address: 'sg2.soulnet.dev', port: 443, protocol: 'trojan', network: 'ws', security: 'tls', subId: 's2', totalBytes: 0, link: 'trojan://pass-p9@sg2.soulnet.dev:443?type=ws&security=tls#Singapore-Edge' },
 ];
 
 const subscriptions = [
-  { id: 's1', name: 'SoulNet Premium', lastUpdated: Date.now() - 42 * 60000 },
-  { id: 's2', name: 'بکاپ رایگان', lastUpdated: Date.now() - 26 * 3600000 },
+  { id: 's1', name: 'SoulNet Premium', lastUpdated: Date.now() - 42 * 60000, url: 'https://sub.soulnet.dev/premium/abc123', configCount: 5 },
+  { id: 's2', name: 'بکاپ رایگان', lastUpdated: Date.now() - 26 * 3600000, url: 'https://sub.soulnet.dev/free/xyz789', configCount: 3 },
 ];
 
 export function installDevMock() {
@@ -118,9 +118,22 @@ export function installDevMock() {
     refreshAllSubscriptions: async () => {},
     deleteSubscription: async () => profiles,
     deleteProfile: async (id) => profiles.filter((p) => p.id !== id),
+    renameProfile: async (id, name) => {
+      const p = profiles.find((x) => x.id === id);
+      if (p) p.name = name;
+      return [...profiles];
+    },
+    updateProfile: async () => { throw new Error('در حالت پیش‌نمایش در دسترس نیست'); },
+    updateSubscription: async (id, patch) => {
+      const s = subscriptions.find((x) => x.id === id);
+      if (s) Object.assign(s, patch);
+      return [...subscriptions];
+    },
     updateSettings: async (patch) => patch,
     exportBackup: async () => ({ canceled: true }),
     importBackup: async () => ({ canceled: true }),
+    saveImage: async () => ({ canceled: true }),
+    copyImage: async () => true,
     resetUsage: async () => profiles,
     resetAllUsage: async () => profiles,
     checkForUpdates: () => {},

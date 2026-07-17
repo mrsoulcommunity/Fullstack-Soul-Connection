@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import ServerList from './components/ServerList.jsx';
 import AddModal from './components/AddModal.jsx';
 import ConnectHero from './components/ConnectHero.jsx';
@@ -99,6 +99,46 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // Global Ctrl+V: smart-detect clipboard content (config link vs subscription
+  // URL) and add it, unless the user is pasting into a real field/modal.
+  const showAddRef = useRef(showAdd);
+  useEffect(() => { showAddRef.current = showAdd; }, [showAdd]);
+
+  useEffect(() => {
+    const onKey = async (e) => {
+      if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'v') return;
+      const inField = /INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.target.isContentEditable;
+      if (inField) return;
+      if (showAddRef.current || finderOpen) return;
+      if (document.body.dataset.modalOpen === 'true') return;
+
+      e.preventDefault();
+      let text;
+      try {
+        text = await navigator.clipboard.readText();
+      } catch {
+        showToast('دسترسی به کلیپ‌بورد ممکن نشد', 'error');
+        return;
+      }
+      text = (text || '').trim();
+      if (!text) return;
+
+      try {
+        if (/^(vmess|vless|trojan|ss):\/\//i.test(text)) {
+          await handleAddLink(text);
+        } else if (/^https?:\/\//i.test(text)) {
+          await handleAddSubscription(text);
+        } else {
+          showToast('محتوای کلیپ‌بورد یک کانفیگ یا لینک سابسکریپشن معتبر نیست', 'error');
+        }
+      } catch (err) {
+        showToast(err.message || 'خطا در افزودن از کلیپ‌بورد', 'error');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [finderOpen]);
+
   useEffect(() => {
     refresh();
     window.soul.getAppInfo().then(setAppInfo).catch(() => {});
@@ -120,12 +160,16 @@ export default function App() {
     return () => { offState(); offLatency(); offTraffic(); offProfiles(); offOpenSettings(); offUpdater(); };
   }, [refresh]);
 
-  function showToast(msg) {
-    setToast(msg);
+  // Stabilized with useCallback: these flow into React.memo'd children
+  // (ServerCard via ServerList, ConnectHero, StatusBar) that sit in the
+  // hottest paths (ping-all, 1s traffic ticks) -- a fresh function reference
+  // every App render would defeat memoization and re-render the whole tree.
+  const showToast = useCallback((msg, type = 'info') => {
+    setToast({ msg, type });
     setTimeout(() => setToast(null), 2600);
-  }
+  }, []);
 
-  async function handleToggleConnect() {
+  const handleToggleConnect = useCallback(async () => {
     if (busy) return;
     setBusy(true);
     try {
@@ -144,9 +188,9 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }
+  }, [busy, connectionState, activeProfileId, showToast]);
 
-  async function handleSelect(id) {
+  const handleSelect = useCallback(async (id) => {
     if (connectionState === 'connected' || connectionState === 'connecting') {
       setBusy(true);
       try {
@@ -159,15 +203,26 @@ export default function App() {
     } else {
       setActiveProfileId(id);
     }
-  }
+  }, [connectionState, showToast]);
 
-  async function handleDelete(id) {
+  const handleDelete = useCallback(async (id) => {
     const updated = await window.soul.deleteProfile(id);
     setProfiles(updated);
-    if (activeProfileId === id) setActiveProfileId(null);
-  }
+    setActiveProfileId((cur) => (cur === id ? null : cur));
+  }, []);
 
-  async function handlePing(id) {
+  const handleRenameProfile = useCallback(async (id, name) => {
+    const updated = await window.soul.renameProfile(id, name);
+    setProfiles(updated);
+  }, []);
+
+  const handleEditProfile = useCallback(async (id, link) => {
+    const updated = await window.soul.updateProfile(id, link);
+    setProfiles(updated);
+    showToast('کانفیگ به‌روزرسانی شد');
+  }, [showToast]);
+
+  const handlePing = useCallback(async (id) => {
     setPings((p) => ({ ...p, [id]: 'measuring' }));
     try {
       const { ms } = await window.soul.pingTest(id);
@@ -177,14 +232,14 @@ export default function App() {
       setPings((p) => ({ ...p, [id]: -1 }));
       return -1;
     }
-  }
+  }, []);
 
-  async function handlePingAll(ids) {
+  const handlePingAll = useCallback(async (ids) => {
     await mapWithConcurrency(ids, PING_CONCURRENCY, (id) => handlePing(id));
-  }
+  }, [handlePing]);
 
   // Connect regardless of current state (used by the finder's result cards).
-  async function handleConnectTo(id) {
+  const handleConnectTo = useCallback(async (id) => {
     if (busy) return;
     setBusy(true);
     try {
@@ -194,32 +249,44 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }
+  }, [busy, showToast]);
 
-  async function handleToggleFavorite(profile) {
+  const handleDisconnect = useCallback(async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await window.soul.disconnect();
+    } catch (err) {
+      showToast(err.message || 'خطا در قطع اتصال');
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, showToast]);
+
+  const handleToggleFavorite = useCallback(async (profile) => {
     try {
       const updated = await window.soul.setFavorite(profile.id, !profile.favorite);
       setProfiles(updated);
     } catch (err) {
       showToast(err.message || 'خطا در ذخیره');
     }
-  }
+  }, [showToast]);
 
-  async function handleAddLink(link) {
+  const handleAddLink = useCallback(async (link) => {
     const profile = await window.soul.addLink(link);
     setProfiles((p) => [...p, profile]);
     setShowAdd(false);
     showToast('کانفیگ اضافه شد');
-  }
+  }, [showToast]);
 
-  async function handleAddSubscription(url) {
+  const handleAddSubscription = useCallback(async (url) => {
     const { profiles: added } = await window.soul.addSubscription(url);
     await refresh();
     setShowAdd(false);
     showToast(`${added.length} کانفیگ از ساب‌اسکریپشن اضافه شد`);
-  }
+  }, [refresh, showToast]);
 
-  async function handleRefreshSubscription(id) {
+  const handleRefreshSubscription = useCallback(async (id) => {
     try {
       const { profiles: added } = await window.soul.refreshSubscription(id);
       await refresh();
@@ -227,9 +294,9 @@ export default function App() {
     } catch (err) {
       showToast(err.message || 'خطا در به‌روزرسانی');
     }
-  }
+  }, [refresh, showToast]);
 
-  async function handleUpdateAllSubscriptions() {
+  const handleUpdateAllSubscriptions = useCallback(async () => {
     if (updatingSubs) return;
     setUpdatingSubs(true);
     try {
@@ -241,15 +308,21 @@ export default function App() {
     } finally {
       setUpdatingSubs(false);
     }
-  }
+  }, [updatingSubs, refresh, showToast]);
 
-  async function handleDeleteSubscription(id) {
+  const handleDeleteSubscription = useCallback(async (id) => {
     const updated = await window.soul.deleteSubscription(id);
     setProfiles(updated);
     await refresh();
-  }
+  }, [refresh]);
 
-  async function handleSetMode(mode) {
+  const handleUpdateSubscription = useCallback(async (id, patch) => {
+    const updated = await window.soul.updateSubscription(id, patch);
+    setSubscriptions(updated);
+    showToast('ساب‌اسکریپشن به‌روزرسانی شد');
+  }, [showToast]);
+
+  const handleSetMode = useCallback(async (mode) => {
     if (mode === connectionMode || connectionState !== 'disconnected') return;
     try {
       await window.soul.setMode(mode);
@@ -257,7 +330,7 @@ export default function App() {
     } catch (err) {
       showToast(err.message || 'خطا در تغییر حالت');
     }
-  }
+  }, [connectionMode, connectionState, showToast]);
 
   async function handleUpdateSettings(patch) {
     try {
@@ -312,7 +385,10 @@ export default function App() {
     setProfiles(updated);
   }
 
-  const activeProfile = profiles.find((p) => p.id === activeProfileId);
+  const activeProfile = useMemo(
+    () => profiles.find((p) => p.id === activeProfileId),
+    [profiles, activeProfileId]
+  );
 
   return (
     <div className={`app-shell ${windowMaximized ? 'maximized' : ''}`}>
@@ -338,6 +414,7 @@ export default function App() {
             profiles={profiles}
             subscriptions={subscriptions}
             activeProfileId={activeProfileId}
+            connectionState={connectionState}
             pings={pings}
             updatingSubs={updatingSubs}
             onSelect={handleSelect}
@@ -348,6 +425,12 @@ export default function App() {
             onRefreshSubscription={handleRefreshSubscription}
             onUpdateAllSubscriptions={handleUpdateAllSubscriptions}
             onDeleteSubscription={handleDeleteSubscription}
+            onConnectTo={handleConnectTo}
+            onDisconnect={handleDisconnect}
+            onRenameProfile={handleRenameProfile}
+            onEditProfile={handleEditProfile}
+            onUpdateSubscription={handleUpdateSubscription}
+            onToast={showToast}
           />
 
           {profiles.length > 0 && (

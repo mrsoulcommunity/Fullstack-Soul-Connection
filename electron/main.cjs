@@ -1,9 +1,9 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notification, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notification, dialog, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
-const { parseLink, parseMany, newId } = require('./lib/parsers.cjs');
+const { parseLink, parseMany, newId, parseSubscriptionUserinfo } = require('./lib/parsers.cjs');
 const { buildXrayConfig } = require('./lib/xrayConfig.cjs');
 const { XrayProcess } = require('./lib/xrayProcess.cjs');
 const systemProxy = require('./lib/systemProxy.cjs');
@@ -270,6 +270,7 @@ function createWindow() {
     icon: APP_ICON_PATH,
     frame: false, // fully custom title bar, drawn in the renderer
     roundedCorners: true, // native DWM corner rounding on Windows 11 when not maximized
+    show: false, // paired with 'ready-to-show' below so launch never flashes an unpainted frame
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       contextIsolation: true,
@@ -280,6 +281,8 @@ function createWindow() {
 
   mainWindow.setMenuBarVisibility(false);
   mainWindow.setAspectRatio(1); // the UI is designed as a 1:1 square, restored on unmaximize/leave-fullscreen below
+
+  mainWindow.once('ready-to-show', () => { mainWindow.show(); });
 
   const indexPath = path.join(__dirname, '..', 'dist', 'index.html');
   mainWindow.loadFile(indexPath);
@@ -483,7 +486,10 @@ app.on('will-quit', async (e) => {
   if (connectionState !== 'disconnected') {
     e.preventDefault();
     await serialize(disconnect);
+    store.flush();
     app.quit();
+  } else {
+    store.flush();
   }
 });
 
@@ -536,10 +542,13 @@ ipcMain.handle('profiles:addLink', (_e, link) => {
   return profile;
 });
 
-ipcMain.handle('profiles:delete', (_e, id) => {
+ipcMain.handle('profiles:delete', async (_e, id) => {
+  if (store.get('activeProfileId') === id) {
+    await serialize(disconnect);
+    store.set('activeProfileId', null);
+  }
   const profiles = store.get('profiles', []).filter((p) => p.id !== id);
   store.set('profiles', profiles);
-  if (store.get('activeProfileId') === id) store.set('activeProfileId', null);
   return profiles;
 });
 
@@ -551,11 +560,33 @@ ipcMain.handle('profiles:rename', (_e, { id, name }) => {
   return profiles;
 });
 
+ipcMain.handle('profiles:update', (_e, { id, link }) => {
+  const parsed = parseLink(link);
+  if (!parsed) throw new Error('کانفیگ نامعتبر است یا پشتیبانی نمی‌شود');
+  if (id === store.get('activeProfileId') && connectionState !== 'disconnected') {
+    throw new Error('اول باید قطع اتصال کنی');
+  }
+  const profiles = store.get('profiles', []);
+  const existing = profiles.find((p) => p.id === id);
+  if (!existing) throw new Error('کانفیگ پیدا نشد');
+  Object.assign(existing, parsed, {
+    id: existing.id,
+    subId: existing.subId,
+    favorite: existing.favorite,
+    totalBytes: existing.totalBytes,
+    createdAt: existing.createdAt,
+    lastUsedAt: existing.lastUsedAt,
+  });
+  store.set('profiles', profiles);
+  return profiles;
+});
+
 ipcMain.handle('subscriptions:add', async (_e, url) => {
-  const text = await fetchText(url);
+  const { text, headers } = await fetchText(url);
   const parsed = parseMany(text);
   if (!parsed.length) throw new Error('هیچ کانفیگی در این ساب‌اسکریپشن پیدا نشد');
-  const sub = { id: newId(), url, name: url, createdAt: Date.now(), lastUpdated: Date.now(), configCount: parsed.length };
+  const usage = parseSubscriptionUserinfo(headers['subscription-userinfo']);
+  const sub = { id: newId(), url, name: url, createdAt: Date.now(), lastUpdated: Date.now(), configCount: parsed.length, usage };
   parsed.forEach((p) => { p.subId = sub.id; });
 
   const subs = store.get('subscriptions', []);
@@ -571,9 +602,10 @@ async function refreshSubscription(subId) {
   const subs = store.get('subscriptions', []);
   const sub = subs.find((s) => s.id === subId);
   if (!sub) throw new Error('ساب‌اسکریپشن پیدا نشد');
-  const text = await fetchText(sub.url);
+  const { text, headers } = await fetchText(sub.url);
   const parsed = parseMany(text);
   parsed.forEach((p) => { p.subId = subId; });
+  const usage = parseSubscriptionUserinfo(headers['subscription-userinfo']);
 
   const activeId = store.get('activeProfileId');
   const remaining = store.get('profiles', []).filter((p) => p.subId !== subId);
@@ -587,6 +619,7 @@ async function refreshSubscription(subId) {
 
   sub.lastUpdated = Date.now();
   sub.configCount = parsed.length;
+  if (usage) sub.usage = usage;
   store.set('subscriptions', subs);
 
   return { subscription: sub, profiles: parsed };
@@ -594,15 +627,12 @@ async function refreshSubscription(subId) {
 
 async function refreshAllSubscriptions() {
   const subs = store.get('subscriptions', []);
-  const results = [];
-  for (const sub of subs) {
-    try {
-      results.push(await refreshSubscription(sub.id));
-    } catch (err) {
-      results.push({ subscription: sub, error: err.message });
-    }
-  }
-  return results;
+  // Each refreshSubscription() call's store read-modify-write is a single
+  // synchronous span (no `await` in between), so running them concurrently
+  // is safe -- and turns N sequential network round-trips into one.
+  return Promise.all(subs.map((sub) =>
+    refreshSubscription(sub.id).catch((err) => ({ subscription: sub, error: err.message }))
+  ));
 }
 
 function scheduleSubAutoUpdate() {
@@ -634,6 +664,16 @@ ipcMain.handle('subscriptions:delete', async (_e, subId) => {
   store.set('profiles', remaining);
   store.set('subscriptions', store.get('subscriptions', []).filter((s) => s.id !== subId));
   return remaining;
+});
+
+ipcMain.handle('subscriptions:update', (_e, { id, name, url }) => {
+  const subs = store.get('subscriptions', []);
+  const sub = subs.find((s) => s.id === id);
+  if (!sub) throw new Error('ساب‌اسکریپشن پیدا نشد');
+  if (name !== undefined) sub.name = name;
+  if (url !== undefined) sub.url = url;
+  store.set('subscriptions', subs);
+  return subs;
 });
 
 ipcMain.handle('connection:connect', async (_e, profileId) => {
@@ -816,6 +856,24 @@ ipcMain.handle('app:exportBackup', async () => {
   };
   fs.writeFileSync(filePath, JSON.stringify(backup, null, 2), 'utf8');
   return { canceled: false, filePath };
+});
+
+ipcMain.handle('app:saveImage', async (_e, { dataUrl, defaultName }) => {
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+    title: 'ذخیره‌ی تصویر QR',
+    defaultPath: defaultName || 'qrcode.png',
+    filters: [{ name: 'PNG Image', extensions: ['png'] }],
+  });
+  if (canceled || !filePath) return { canceled: true };
+  const base64 = String(dataUrl).replace(/^data:image\/png;base64,/, '');
+  fs.writeFileSync(filePath, Buffer.from(base64, 'base64'));
+  return { canceled: false, filePath };
+});
+
+ipcMain.handle('app:copyImage', (_e, dataUrl) => {
+  const img = nativeImage.createFromDataURL(dataUrl);
+  clipboard.writeImage(img);
+  return true;
 });
 
 ipcMain.handle('app:importBackup', async () => {

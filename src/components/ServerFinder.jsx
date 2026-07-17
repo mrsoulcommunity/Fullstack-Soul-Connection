@@ -126,7 +126,7 @@ function SpeedDash({ active }) {
 
 /* ---------- result card ---------- */
 
-function ResultCard({ profile, sub, result, selected, expanded, recommended, isActive, testing, priority, engineIdle, onSelect, onExpand, onConnect, onFavorite, onRetest, onContext }) {
+const ResultCard = React.memo(function ResultCard({ index, profile, sub, result, selected, expanded, recommended, isActive, testing, priority, engineIdle, onSelect, onExpand, onConnect, onFavorite, onRetest, onContext }) {
   const geo = countryOf(profile);
   const m = extractMetrics(result);
   const score = healthScore(result, priority);
@@ -136,14 +136,14 @@ function ResultCard({ profile, sub, result, selected, expanded, recommended, isA
   return (
     <div
       className={`fcard ${selected ? 'sel' : ''} ${expanded ? 'open' : ''} ${isActive ? 'active' : ''} ${failed ? 'failed' : ''}`}
-      onClick={() => { onSelect(); onExpand(); }}
-      onContextMenu={onContext}
+      onClick={() => { onSelect(index); onExpand(profile.id); }}
+      onContextMenu={(e) => onContext(e, profile, index)}
     >
       <div className="fcard-row">
         <button
           className={`fav-btn ${profile.favorite ? 'on' : ''}`}
           title={profile.favorite ? 'حذف از موردعلاقه‌ها' : 'افزودن به موردعلاقه‌ها'}
-          onClick={(e) => { e.stopPropagation(); onFavorite(); }}
+          onClick={(e) => { e.stopPropagation(); onFavorite(profile); }}
         >
           <Icon name="star" size={14} />
         </button>
@@ -181,7 +181,7 @@ function ResultCard({ profile, sub, result, selected, expanded, recommended, isA
 
         <button
           className="fcard-connect"
-          onClick={(e) => { e.stopPropagation(); onConnect(); }}
+          onClick={(e) => { e.stopPropagation(); onConnect(profile.id); }}
           disabled={isActive}
         >
           {isActive ? 'متصل' : 'اتصال'}
@@ -226,7 +226,7 @@ function ResultCard({ profile, sub, result, selected, expanded, recommended, isA
                 key={mode.key}
                 className="btn mini"
                 disabled={!engineIdle}
-                onClick={() => onRetest(mode.key)}
+                onClick={() => onRetest(profile.id, mode.key)}
               >
                 <Icon name={mode.icon} size={12} />
                 {mode.title}
@@ -237,7 +237,7 @@ function ResultCard({ profile, sub, result, selected, expanded, recommended, isA
       )}
     </div>
   );
-}
+});
 
 const PHASE_SHORT = {
   boot: 'راه‌اندازی تونل…',
@@ -360,6 +360,27 @@ export default function ServerFinder({ profiles, subscriptions, activeProfileId,
       const next = [v, ...r.filter((x) => x !== v)].slice(0, 8);
       saveRecent(next);
       return next;
+    });
+  }, []);
+
+  // Stable (index/id-taking) handlers so ResultCard's React.memo isn't
+  // defeated by a fresh closure every render -- critical since `t.results`
+  // (and therefore this whole component) can now re-render up to once per
+  // animation frame while a test batch is running.
+  const handleCardExpand = useCallback((id) => {
+    setExpandedId((cur) => (cur === id ? null : id));
+  }, []);
+  const handleCardConnect = useCallback((id) => {
+    commitRecent(query);
+    onConnect(id);
+  }, [commitRecent, onConnect, query]);
+  const handleCardContext = useCallback((e, profile, index) => {
+    e.preventDefault();
+    setSelIdx(index);
+    setCtxMenu({
+      x: Math.min(e.clientX, window.innerWidth - 200),
+      y: Math.min(e.clientY, window.innerHeight - 230),
+      profile,
     });
   }, []);
 
@@ -625,7 +646,7 @@ export default function ServerFinder({ profiles, subscriptions, activeProfileId,
         {/* ---- batch progress ---- */}
         {running && (
           <div className="progress-strip">
-            <div className="progress-track"><div className="progress-fill" style={{ width: `${progress}%` }} /></div>
+            <div className="progress-track"><div className="progress-fill" style={{ transform: `scaleX(${progress / 100})` }} /></div>
             <span className="progress-text mono">{t.done}/{t.total}</span>
             {t.status === 'paused' ? <span className="progress-eta">متوقف</span>
               : eta != null && <span className="progress-eta">{fmtEta(eta)} مانده</span>}
@@ -687,6 +708,7 @@ export default function ServerFinder({ profiles, subscriptions, activeProfileId,
               return (
                 <ResultCard
                   key={p.id}
+                  index={i}
                   profile={p}
                   sub={subsById[p.subId]}
                   result={r}
@@ -697,20 +719,12 @@ export default function ServerFinder({ profiles, subscriptions, activeProfileId,
                   testing={r?.status === 'testing' || r?.status === 'queued'}
                   priority={priority}
                   engineIdle={t.status === 'idle'}
-                  onSelect={() => setSelIdx(i)}
-                  onExpand={() => setExpandedId((id) => (id === p.id ? null : p.id))}
-                  onConnect={() => { commitRecent(query); onConnect(p.id); }}
-                  onFavorite={() => onToggleFavorite(p)}
-                  onRetest={(mk) => engine.testOne(p.id, mk)}
-                  onContext={(e) => {
-                    e.preventDefault();
-                    setSelIdx(i);
-                    setCtxMenu({
-                      x: Math.min(e.clientX, window.innerWidth - 200),
-                      y: Math.min(e.clientY, window.innerHeight - 230),
-                      profile: p,
-                    });
-                  }}
+                  onSelect={setSelIdx}
+                  onExpand={handleCardExpand}
+                  onConnect={handleCardConnect}
+                  onFavorite={onToggleFavorite}
+                  onRetest={engine.testOne}
+                  onContext={handleCardContext}
                 />
               );
             })

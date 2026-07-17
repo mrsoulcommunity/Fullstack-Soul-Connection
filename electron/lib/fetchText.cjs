@@ -27,7 +27,7 @@ function fetchText(url, timeoutMs = 15000, redirectsLeft = 5) {
       }
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
-      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      res.on('end', () => resolve({ text: Buffer.concat(chunks).toString('utf8'), headers: res.headers }));
     });
     req.on('timeout', () => req.destroy(new Error('Subscription request timed out')));
     req.on('error', reject);

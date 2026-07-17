@@ -16,11 +16,13 @@ contextBridge.exposeInMainWorld('soul', {
   addLink: (link) => ipcRenderer.invoke('profiles:addLink', link),
   deleteProfile: (id) => ipcRenderer.invoke('profiles:delete', id),
   renameProfile: (id, name) => ipcRenderer.invoke('profiles:rename', { id, name }),
+  updateProfile: (id, link) => ipcRenderer.invoke('profiles:update', { id, link }),
 
   addSubscription: (url) => ipcRenderer.invoke('subscriptions:add', url),
   refreshSubscription: (id) => ipcRenderer.invoke('subscriptions:refresh', id),
   refreshAllSubscriptions: () => ipcRenderer.invoke('subscriptions:refreshAll'),
   deleteSubscription: (id) => ipcRenderer.invoke('subscriptions:delete', id),
+  updateSubscription: (id, patch) => ipcRenderer.invoke('subscriptions:update', { id, ...patch }),
 
   setMode: (mode) => ipcRenderer.invoke('settings:setMode', mode),
   getSettings: () => ipcRenderer.invoke('settings:get'),
@@ -32,6 +34,8 @@ contextBridge.exposeInMainWorld('soul', {
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   exportBackup: () => ipcRenderer.invoke('app:exportBackup'),
   importBackup: () => ipcRenderer.invoke('app:importBackup'),
+  saveImage: (dataUrl, defaultName) => ipcRenderer.invoke('app:saveImage', { dataUrl, defaultName }),
+  copyImage: (dataUrl) => ipcRenderer.invoke('app:copyImage', dataUrl),
   resetUsage: (id) => ipcRenderer.invoke('profiles:resetUsage', id),
   resetAllUsage: () => ipcRenderer.invoke('profiles:resetAllUsage'),
 

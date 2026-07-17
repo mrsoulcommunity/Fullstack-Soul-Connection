@@ -15,7 +15,7 @@ const LABELS = {
   disconnecting: 'در حال قطع…',
 };
 
-export default function ConnectHero({ connectionState, connectionMode, activeProfile, onToggle, onSetMode }) {
+function ConnectHero({ connectionState, connectionMode, activeProfile, onToggle, onSetMode }) {
   const busy = connectionState === 'connecting' || connectionState === 'disconnecting';
   const modeLocked = connectionState !== 'disconnected';
 
@@ -76,3 +76,7 @@ export default function ConnectHero({ connectionState, connectionMode, activePro
     </section>
   );
 }
+
+// Doesn't depend on `pings`/`traffic` -- memoized so App's 1s traffic-poll
+// re-render and ping-all bursts don't repaint this whole animated hero.
+export default React.memo(ConnectHero);

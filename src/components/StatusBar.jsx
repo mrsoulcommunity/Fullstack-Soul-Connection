@@ -26,7 +26,7 @@ function latencyTone(ms) {
   return 'bad';
 }
 
-export default function StatusBar({ connectionState, activeProfile, connectedAt, latencyMs, selectedPing, traffic, notice }) {
+function StatusBar({ connectionState, activeProfile, connectedAt, latencyMs, selectedPing, traffic, notice }) {
   const connected = connectionState === 'connected';
   const [now, setNow] = useState(Date.now());
 
@@ -100,11 +100,16 @@ export default function StatusBar({ connectionState, activeProfile, connectedAt,
       </div>
 
       {notice && (
-        <div className="rail-notice" role="status">
+        <div className={`rail-notice ${notice.type === 'error' ? 'error' : ''}`} role="status">
           <Icon name="info" size={14} />
-          {notice}
+          {notice.msg}
         </div>
       )}
     </footer>
   );
 }
+
+// `selectedPing`/`activeProfile` are usually unchanged on any given ping-all
+// tick (only the pinged profile's value moves), so memoizing skips a re-render
+// of this whole footer for every other tick.
+export default React.memo(StatusBar);

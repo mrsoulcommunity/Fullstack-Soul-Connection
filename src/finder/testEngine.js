@@ -67,6 +67,21 @@ function emit() {
   for (const fn of listeners) fn();
 }
 
+// 'sample'/'speed' events can arrive every ~15-20ms per in-flight test (up to
+// 8 concurrent), which would otherwise force a full ServerFinder re-render
+// far more often than the screen can even show a new frame. Coalescing to
+// one emit per animation frame caps re-renders at the display's refresh rate
+// without dropping any visual update.
+let emitScheduled = false;
+function emitThrottled() {
+  if (emitScheduled) return;
+  emitScheduled = true;
+  requestAnimationFrame(() => {
+    emitScheduled = false;
+    emit();
+  });
+}
+
 export function subscribe(fn) {
   listeners.add(fn);
   return () => listeners.delete(fn);
@@ -112,6 +127,8 @@ function ensureEventBridge() {
     } else if (ev.type === 'sample') {
       r.liveSamples = [...(r.liveSamples || []), ev.ms];
       state.pulse = [...state.pulse, { t: Date.now(), ms: ev.ms, profileId }].slice(-120);
+      emitThrottled();
+      return;
     } else if (ev.type === 'speed') {
       state.activeSpeed = {
         profileId,
@@ -119,6 +136,8 @@ function ensureEventBridge() {
         bps: ev.bps,
         samples: [...(state.activeSpeed?.profileId === profileId ? state.activeSpeed.samples : []), { t: ev.elapsed, bps: ev.bps, dir: ev.dir }].slice(-160),
       };
+      emitThrottled();
+      return;
     }
     emit();
   });

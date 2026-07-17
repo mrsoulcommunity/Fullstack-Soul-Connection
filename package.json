@@ -16,7 +16,8 @@
   "dependencies": {
     "@grpc/grpc-js": "^1.12.2",
     "@grpc/proto-loader": "^0.7.13",
-    "electron-updater": "^6.3.9"
+    "electron-updater": "^6.3.9",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",

@@ -31,10 +31,14 @@ const PATHS = {
   globe: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z M2 12h20 M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10Z',
   history: 'M3.5 12a8.5 8.5 0 1 0 2.8-6.3 M3.5 4.5V9H8 M12 7.5V12l3 3',
   check: 'M4.5 12.5l5 5 10-11',
+  edit: 'M12 20h9 M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z',
+  copy: 'M9 9h11v11H9Z M5 15V5a1 1 0 0 1 1-1h9',
   radar: 'M16.2 12a4.2 4.2 0 1 1-1.23-2.97 M21.2 8A10 10 0 1 1 16 2.9 M12 12l7-7',
   winMinimize: 'M5 12.5h14',
   winMaximize: 'M6 6h12v12H6Z',
   winRestore: 'M9 6h8v8h-8Z M6 9h8v8H6Z',
+  qrcode: 'M3 3h7v7H3V3Z M14 3h7v7h-7V3Z M3 14h7v7H3v-7Z M14 14h3v3h-3v-3Z M18 14h3v3h-3v-3Z M14 18h3v3h-3v-3Z M18 18h3v3h-3v-3Z M6 6h1v1H6V6Z M17 6h1v1h-1V6Z M6 17h1v1H6v-1Z',
+  download: 'M12 3v13 M7 12l5 5 5-5 M4 21h16',
 };
 
 export default function Icon({ name, size = 16, strokeWidth = 2, className = '' }) {

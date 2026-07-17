@@ -1,6 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import Icon from './Icon.jsx';
-import { formatBytes } from '../utils/format.js';
+import ContextMenu from './ContextMenu.jsx';
+import { RenameModal, EditProfileModal, EditSubscriptionModal, SubscriptionDetailsModal, ConfirmModal } from './ManageModals.jsx';
+import QrModal from './QrModal.jsx';
+import SubTestModal from './SubTestModal.jsx';
+import * as engine from '../finder/testEngine.js';
+import { formatBytes, relativeTime, subUsageInfo } from '../utils/format.js';
 
 function pingClass(ms) {
   if (ms === undefined) return 'na';
@@ -18,21 +23,22 @@ function pingLabel(ms) {
   return `${ms}ms`;
 }
 
-function relativeTime(ts) {
-  if (!ts) return 'هرگز';
-  const diff = Date.now() - ts;
-  const min = Math.floor(diff / 60000);
-  if (min < 1) return 'همین الان';
-  if (min < 60) return `${min} دقیقه پیش`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} ساعت پیش`;
-  const day = Math.floor(hr / 24);
-  return `${day} روز پیش`;
+function groupStats(items, pings) {
+  const totalBytes = items.reduce((sum, p) => sum + (p.totalBytes || 0), 0);
+  const measured = items
+    .map((p) => pings[p.id])
+    .filter((v) => typeof v === 'number' && v > 0);
+  const bestPing = measured.length ? Math.min(...measured) : undefined;
+  return { totalBytes, bestPing };
 }
 
-function ServerCard({ profile, active, ms, onSelect, onDelete, onPing }) {
+// Memoized so a ping/traffic tick that changes one card's `ms` (or unrelated
+// App state) doesn't re-render every other card in a list that can run into
+// the hundreds. Relies on `onSelect`/`onDelete`/`onPing`/`onContextMenu` being
+// referentially stable (useCallback'd) across unrelated re-renders.
+const ServerCard = React.memo(function ServerCard({ profile, active, ms, onSelect, onRequestDelete, onPing, onContextMenu }) {
   return (
-    <div className={`server-card ${active ? 'active' : ''}`}>
+    <div className={`server-card ${active ? 'active' : ''}`} onContextMenu={(e) => onContextMenu(e, profile)}>
       <span className="proto-tag">{profile.protocol}</span>
       <div className="info" onClick={() => onSelect(profile.id)}>
         <div className="name">
@@ -47,21 +53,101 @@ function ServerCard({ profile, active, ms, onSelect, onDelete, onPing }) {
       <button className={`ping ${pingClass(ms)}`} onClick={() => onPing(profile.id)}>
         {pingLabel(ms)}
       </button>
-      <button className="del" onClick={() => onDelete(profile.id)} title="حذف">
+      <button className="del" onClick={() => onRequestDelete(profile)} title="حذف">
         <Icon name="close" size={13} />
       </button>
     </div>
   );
-}
+});
 
 export default function ServerList({
-  profiles, subscriptions, activeProfileId, pings, updatingSubs,
+  profiles, subscriptions, activeProfileId, connectionState, pings, updatingSubs,
   onSelect, onDelete, onPing, onPingAll, onAdd,
   onRefreshSubscription, onUpdateAllSubscriptions, onDeleteSubscription,
+  onConnectTo, onDisconnect, onRenameProfile, onEditProfile, onUpdateSubscription, onToast,
 }) {
   const [query, setQuery] = useState('');
   const [sortBy, setSortBy] = useState('default');
   const [collapsed, setCollapsed] = useState({});
+  const [ctxMenu, setCtxMenu] = useState(null);
+  const [modal, setModal] = useState(null);
+  const [confirmDelete, setConfirmDelete] = useState(null);
+  const [testModal, setTestModal] = useState(null); // { sub, mode, autoConnectBest }
+
+  // Signals the global Ctrl+V handler in App.jsx that a menu/modal owned by
+  // this component is open, so it doesn't add clipboard content behind it.
+  useEffect(() => {
+    document.body.dataset.modalOpen = (modal || ctxMenu || confirmDelete || testModal) ? 'true' : 'false';
+    return () => { document.body.dataset.modalOpen = 'false'; };
+  }, [modal, ctxMenu, confirmDelete, testModal]);
+
+  const requestDeleteProfile = useCallback((profile) => {
+    setConfirmDelete({ type: 'profile', id: profile.id, label: profile.name || profile.address });
+  }, []);
+
+  const requestDeleteSubscription = useCallback((sub) => {
+    setConfirmDelete({ type: 'subscription', id: sub.id, label: sub.name });
+  }, []);
+
+  // Both "Ping All Servers" and "Connect to Best Server" run a scoped batch
+  // through the shared Server Finder engine — only one batch can run at a
+  // time app-wide, so bail out with a toast instead of hijacking one that's
+  // already in flight (e.g. started from the finder).
+  const startSubTest = useCallback((sub, mode, autoConnectBest) => {
+    if (engine.getSnapshot().status !== 'idle') {
+      onToast?.('یک تست دیگر در حال اجراست — صبر کن تا تمام شود', 'error');
+      return;
+    }
+    const subProfiles = profiles.filter((p) => p.subId === sub.id);
+    if (!subProfiles.length) {
+      onToast?.('این ساب‌اسکریپشن کانفیگی ندارد', 'error');
+      return;
+    }
+    setTestModal({ sub, mode, autoConnectBest });
+  }, [profiles, onToast]);
+
+  // useCallback'd (with only truly-hot-changing deps) so this stays a stable
+  // reference across ping/traffic-driven re-renders, letting ServerCard's
+  // React.memo actually skip re-rendering unaffected cards.
+  const copyText = useCallback((text, msg) => {
+    navigator.clipboard?.writeText(text)
+      .then(() => onToast?.(msg))
+      .catch(() => onToast?.('کپی ناموفق بود', 'error'));
+  }, [onToast]);
+
+  const openProfileMenu = useCallback((e, profile) => {
+    e.preventDefault();
+    const isActiveConnected = profile.id === activeProfileId && (connectionState === 'connected' || connectionState === 'connecting');
+    const items = [
+      isActiveConnected
+        ? { icon: 'stop', label: 'قطع اتصال', onClick: () => onDisconnect() }
+        : { icon: 'power', label: 'اتصال', onClick: () => onConnectTo(profile.id) },
+      { icon: 'gauge', label: 'نمایش پینگ', onClick: () => onPing(profile.id) },
+      { icon: 'edit', label: 'ویرایش', sepBefore: true, onClick: () => setModal({ type: 'editProfile', profile }) },
+      { icon: 'edit', label: 'تغییر نام', onClick: () => setModal({ type: 'renameProfile', profile }) },
+      { icon: 'copy', label: 'کپی', onClick: () => copyText(profile.link, 'لینک کپی شد') },
+      { icon: 'arrowUp', label: 'اشتراک‌گذاری / خروجی گرفتن', onClick: () => copyText(profile.link, 'لینک برای اشتراک‌گذاری کپی شد') },
+      { icon: 'qrcode', label: 'اشتراک‌گذاری با QR', onClick: () => setModal({ type: 'qr', value: profile.link, title: profile.name || profile.address, subtitle: `${profile.address}:${profile.port}` }) },
+      { icon: 'trash', label: 'حذف', danger: true, sepBefore: true, onClick: () => requestDeleteProfile(profile) },
+    ];
+    setCtxMenu({ x: e.clientX, y: e.clientY, title: profile.name || profile.address, items });
+  }, [activeProfileId, connectionState, onDisconnect, onConnectTo, onPing, requestDeleteProfile, copyText]);
+
+  const openSubMenu = useCallback((e, sub) => {
+    e.preventDefault();
+    const items = [
+      { icon: 'bolt', label: 'اتصال به بهترین سرور', onClick: () => startSubTest(sub, 'ping', true) },
+      { icon: 'gauge', label: 'پینگ گرفتن از تمام سرورها', onClick: () => startSubTest(sub, 'ping', false) },
+      { icon: 'refresh', label: 'به‌روزرسانی ساب‌اسکریپشن', sepBefore: true, onClick: () => onRefreshSubscription(sub.id) },
+      { icon: 'edit', label: 'ویرایش', sepBefore: true, onClick: () => setModal({ type: 'editSub', sub }) },
+      { icon: 'edit', label: 'تغییر نام', onClick: () => setModal({ type: 'renameSub', sub }) },
+      { icon: 'copy', label: 'کپی لینک', onClick: () => copyText(sub.url, 'لینک ساب‌اسکریپشن کپی شد') },
+      { icon: 'qrcode', label: 'اشتراک‌گذاری با QR', onClick: () => setModal({ type: 'qr', value: sub.url, title: sub.name, subtitle: `${sub.configCount ?? 0} کانفیگ` }) },
+      { icon: 'info', label: 'مشاهده اطلاعات', onClick: () => setModal({ type: 'details', sub }) },
+      { icon: 'trash', label: 'حذف', danger: true, sepBefore: true, onClick: () => requestDeleteSubscription(sub) },
+    ];
+    setCtxMenu({ x: e.clientX, y: e.clientY, title: sub.name, items });
+  }, [onRefreshSubscription, requestDeleteSubscription, copyText, startSubTest]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -81,7 +167,7 @@ export default function ServerList({
     return list;
   }, [profiles, query, sortBy, pings]);
 
-  const groups = useMemoGroups(filtered, subscriptions);
+  const groups = useMemoGroups(filtered, subscriptions, pings);
 
   if (!profiles.length) {
     return (
@@ -128,26 +214,75 @@ export default function ServerList({
       )}
 
       <div className="list">
-        {groups.map((group) => (
-          <div key={group.key} className="server-group">
-            {group.sub && (
-              <div className="group-head">
-                <button
-                  className="group-toggle"
-                  onClick={() => setCollapsed((c) => ({ ...c, [group.key]: !c[group.key] }))}
-                >
-                  <span className={`chev ${collapsed[group.key] ? 'closed' : ''}`}>
-                    <Icon name="chevron" size={12} />
-                  </span>
-                  <span className="group-name">{group.sub.name}</span>
-                  <span className="group-meta">{relativeTime(group.sub.lastUpdated)}</span>
-                </button>
-                <button className="group-action" onClick={() => onRefreshSubscription(group.sub.id)} title="به‌روزرسانی">
-                  <Icon name="refresh" size={13} />
-                </button>
-                <button className="group-action danger" onClick={() => onDeleteSubscription(group.sub.id)} title="حذف ساب‌اسکریپشن">
-                  <Icon name="close" size={13} />
-                </button>
+        {groups.map((group) => {
+          const usageInfo = !group.local ? subUsageInfo(group.sub) : null;
+          const critical = usageInfo && (usageInfo.expired || usageInfo.exhausted);
+          return (
+          <div key={group.key} className={`server-group ${group.local ? 'local-group' : ''}`}>
+            {(group.sub || group.local) && (
+              <div
+                className={`group-head ${group.local ? 'local' : ''} ${critical ? 'critical' : ''}`}
+                onContextMenu={!group.local ? (e) => openSubMenu(e, group.sub) : undefined}
+              >
+                <div className="group-head-row">
+                  <button
+                    className="group-toggle"
+                    onClick={() => setCollapsed((c) => ({ ...c, [group.key]: !c[group.key] }))}
+                  >
+                    <span className={`chev ${collapsed[group.key] ? 'closed' : ''}`}>
+                      <Icon name="chevron" size={12} />
+                    </span>
+                    {group.local && <Icon name="folder" size={12} className="local-icon" />}
+                    <span className="group-name">{group.local ? 'لوکال' : group.sub.name}</span>
+                    <span className="group-stats">
+                      {group.stats.totalBytes > 0 && (
+                        <span className="stat-chip size">{formatBytes(group.stats.totalBytes)}</span>
+                      )}
+                      <span className={`stat-chip ping ${pingClass(group.stats.bestPing)}`}>
+                        {group.stats.bestPing !== undefined ? `${group.stats.bestPing}ms` : '—'}
+                      </span>
+                    </span>
+                    {!group.local && <span className="group-meta">{relativeTime(group.sub.lastUpdated)}</span>}
+                  </button>
+                  {!group.local && (
+                    <>
+                      <button className="group-action" onClick={() => onRefreshSubscription(group.sub.id)} title="به‌روزرسانی">
+                        <Icon name="refresh" size={13} />
+                      </button>
+                      <button className="group-action danger" onClick={() => requestDeleteSubscription(group.sub)} title="حذف ساب‌اسکریپشن">
+                        <Icon name="close" size={13} />
+                      </button>
+                    </>
+                  )}
+                </div>
+                {usageInfo && (
+                  <div className="sub-usage">
+                    <div className="usage-bar-track">
+                      <div
+                        className={`usage-bar-fill ${critical ? 'critical' : ''}`}
+                        style={{ transform: `scaleX(${Math.max(usageInfo.total > 0 ? usageInfo.pct : 0, usageInfo.total > 0 ? 2 : 0) / 100})` }}
+                      />
+                    </div>
+                    <div className="usage-row">
+                      <span className="usage-text">
+                        {usageInfo.total > 0
+                          ? `${formatBytes(usageInfo.used)} / ${formatBytes(usageInfo.total)}`
+                          : formatBytes(usageInfo.used)}
+                      </span>
+                      {usageInfo.daysLeft !== null && (
+                        <span className={`usage-expiry ${usageInfo.expired ? 'critical' : ''}`}>
+                          {usageInfo.expired ? 'منقضی شده' : `${usageInfo.daysLeft} روز تا انقضا`}
+                        </span>
+                      )}
+                    </div>
+                    {critical && (
+                      <div className="usage-warn">
+                        <Icon name="info" size={11} />
+                        {usageInfo.expired ? 'این ساب‌اسکریپشن منقضی شده است' : 'حجم این ساب‌اسکریپشن به پایان رسیده است'}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             {!collapsed[group.key] && group.items.map((p) => (
@@ -157,18 +292,94 @@ export default function ServerList({
                 active={p.id === activeProfileId}
                 ms={pings[p.id]}
                 onSelect={onSelect}
-                onDelete={onDelete}
+                onRequestDelete={requestDeleteProfile}
                 onPing={onPing}
+                onContextMenu={openProfileMenu}
               />
             ))}
           </div>
-        ))}
+          );
+        })}
       </div>
+
+      {ctxMenu && <ContextMenu {...ctxMenu} onClose={() => setCtxMenu(null)} />}
+
+      {modal?.type === 'renameProfile' && (
+        <RenameModal
+          title="تغییر نام کانفیگ"
+          initialValue={modal.profile.name}
+          onClose={() => setModal(null)}
+          onSubmit={(name) => onRenameProfile(modal.profile.id, name)}
+        />
+      )}
+      {modal?.type === 'editProfile' && (
+        <EditProfileModal
+          profile={modal.profile}
+          onClose={() => setModal(null)}
+          onSubmit={(link) => onEditProfile(modal.profile.id, link)}
+        />
+      )}
+      {modal?.type === 'renameSub' && (
+        <RenameModal
+          title="تغییر نام ساب‌اسکریپشن"
+          initialValue={modal.sub.name}
+          onClose={() => setModal(null)}
+          onSubmit={(name) => onUpdateSubscription(modal.sub.id, { name })}
+        />
+      )}
+      {modal?.type === 'editSub' && (
+        <EditSubscriptionModal
+          sub={modal.sub}
+          onClose={() => setModal(null)}
+          onSubmit={(patch) => onUpdateSubscription(modal.sub.id, patch)}
+        />
+      )}
+      {modal?.type === 'details' && (
+        <SubscriptionDetailsModal sub={modal.sub} onClose={() => setModal(null)} />
+      )}
+      {modal?.type === 'qr' && (
+        <QrModal
+          title={modal.title}
+          subtitle={modal.subtitle}
+          value={modal.value}
+          onClose={() => setModal(null)}
+          onToast={onToast}
+        />
+      )}
+
+      {testModal && (
+        <SubTestModal
+          sub={testModal.sub}
+          profiles={profiles}
+          mode={testModal.mode}
+          autoConnectBest={testModal.autoConnectBest}
+          activeProfileId={activeProfileId}
+          connectionState={connectionState}
+          onConnect={onConnectTo}
+          onClose={() => setTestModal(null)}
+          onToast={onToast}
+        />
+      )}
+
+      {confirmDelete && (
+        <ConfirmModal
+          title={confirmDelete.type === 'subscription' ? 'حذف ساب‌اسکریپشن' : 'حذف کانفیگ'}
+          message={
+            `آیا از حذف ${confirmDelete.label ? `"${confirmDelete.label}"` : 'این مورد'} مطمئن هستید؟ ` +
+            'این عملیات غیرقابل بازگشت است.'
+          }
+          onClose={() => setConfirmDelete(null)}
+          onConfirm={() => {
+            if (confirmDelete.type === 'subscription') onDeleteSubscription(confirmDelete.id);
+            else onDelete(confirmDelete.id);
+          }}
+        />
+      )}
     </div>
   );
 }
 
-function useMemoGroups(filtered, subscriptions) {
+function useMemoGroups(filtered, subscriptions, pings) {
   return useMemo(() => {
     const bySub = new Map();
     const noGroup = [];
@@ -181,11 +392,11 @@ function useMemoGroups(filtered, subscriptions) {
       }
     }
     const groups = [];
+    if (noGroup.length) groups.push({ key: 'none', sub: null, local: true, items: noGroup, stats: groupStats(noGroup, pings) });
     for (const sub of subscriptions) {
       const items = bySub.get(sub.id) || [];
-      if (items.length) groups.push({ key: sub.id, sub, items });
+      if (items.length) groups.push({ key: sub.id, sub, items, stats: groupStats(items, pings) });
     }
-    if (noGroup.length) groups.push({ key: 'none', sub: null, items: noGroup });
     return groups;
-  }, [filtered, subscriptions]);
+  }, [filtered, subscriptions, pings]);
 }
