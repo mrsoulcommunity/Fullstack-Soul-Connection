@@ -19,9 +19,13 @@ function progressText(progress, connectionState) {
     case 'connecting':
       return `اتصال به ${progress.server}`;
     case 'done':
-      return connectionState === 'connected'
-        ? `${progress.server} — ${progress.avg}ms`
-        : null;
+      if (connectionState !== 'connected') return null;
+      // pingOnly means no tunnel test passed and this server was chosen on
+      // reachability alone -- don't quote a latency we didn't measure through
+      // the tunnel as though we had.
+      return progress.pingOnly
+        ? `${progress.server} — انتخاب بر پایه‌ی پینگ`
+        : `${progress.server} — ${progress.avg}ms`;
     case 'error':
       return progress.message || null;
     default:

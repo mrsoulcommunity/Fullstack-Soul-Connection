@@ -333,7 +333,30 @@ class SoulPool {
       }
     }
 
-    throw new Error('هیچ‌کدام از سرورهای سول کانکشن تونل سالمی برقرار نکردند');
+    // Last resort: connect to the best server that answered a real ping.
+    //
+    // Stage 2 is a *ranking* tool, and treating it as a gate means a single
+    // bad moment -- a slow link, an antivirus stalling xray's boot, four
+    // finalists that all happen to be busy -- ends with the user connected to
+    // nothing at all, even though servers are demonstrably reachable. A live
+    // connection through a merely-reachable server beats a refusal, and if it
+    // turns out to be dead the drop handler re-selects anyway.
+    const best = alive[0];
+    this._rememberWinner(best.profile);
+    return {
+      profile: best.profile,
+      metrics: {
+        avg: Math.round(best.avg),
+        jitter: 0,
+        loss: best.loss || 0,
+        tested: alive.length,
+        alive: alive.length,
+        total: profiles.length,
+        // Tells the UI this one was picked on reachability alone, so it can
+        // say so rather than implying a quality measurement it never made.
+        pingOnly: true,
+      },
+    };
   }
 }
 

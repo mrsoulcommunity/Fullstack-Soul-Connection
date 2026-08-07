@@ -79,16 +79,30 @@ const store = new JsonStore(path.join(userDataDir, 'profiles.json'), {
   systemProxyEnabled: false, // app-owned live state, not a user preference -- set only by systemProxy:enable/disable and the disconnect safety net
 });
 
-const xrayBin = app.isPackaged
-  ? path.join(process.resourcesPath, 'bin', 'xray.exe')
-  : path.join(__dirname, '..', 'bin', 'xray.exe');
+// Packaged, extraResources flattens the per-arch binary and the shared .dat
+// files into one resources/bin. In the repo they're split: xray.exe lives in
+// bin/win-x64 (or win-ia32) while geoip.dat/geosite.dat stay in bin/ -- so the
+// binary and the assets need resolving separately.
+function resolveXrayPaths() {
+  if (app.isPackaged) {
+    const dir = path.join(process.resourcesPath, 'bin');
+    return { bin: path.join(dir, 'xray.exe'), assets: dir };
+  }
+  const binRoot = path.join(__dirname, '..', 'bin');
+  const flat = path.join(binRoot, 'xray.exe');
+  if (fs.existsSync(flat)) return { bin: flat, assets: binRoot };
+  const archDir = path.join(binRoot, process.arch === 'ia32' ? 'win-ia32' : 'win-x64');
+  return { bin: path.join(archDir, 'xray.exe'), assets: binRoot };
+}
+
+const { bin: xrayBin, assets: xrayAssetDir } = resolveXrayPaths();
 const xrayWorkDir = path.join(userDataDir, 'xray-run');
 
-const xray = new XrayProcess(xrayBin, xrayWorkDir);
+const xray = new XrayProcess(xrayBin, xrayWorkDir, xrayAssetDir);
 
 // Same work root the manual server tests use -- startTestTunnel() already
 // carves a throwaway per-test subdirectory out of it.
-const soulPool = new SoulPool({ store, xrayBin, workRoot: xrayWorkDir });
+const soulPool = new SoulPool({ store, xrayBin, xrayAssetDir, workRoot: xrayWorkDir });
 
 // Local proxy log panel (Network settings): keep a capped ring buffer so a
 // freshly opened panel isn't empty, and forward each line live.
@@ -1167,7 +1181,7 @@ ipcMain.handle('test:real', async (_e, { profileId, token }) => {
   const signal = serverTest.begin(token);
   try {
     return await serverTest.realPing(profile, {
-      xrayBin, workRoot: xrayWorkDir, signal,
+      xrayBin, xrayAssetDir, workRoot: xrayWorkDir, signal,
       emit: (type, data) => emitTestEvent(token, type, data),
     });
   } finally {
@@ -1180,7 +1194,7 @@ ipcMain.handle('test:speed', async (_e, { profileId, token }) => {
   const signal = serverTest.begin(token);
   try {
     return await serverTest.speedTest(profile, {
-      xrayBin, workRoot: xrayWorkDir, signal,
+      xrayBin, xrayAssetDir, workRoot: xrayWorkDir, signal,
       emit: (type, data) => emitTestEvent(token, type, data),
     });
   } finally {

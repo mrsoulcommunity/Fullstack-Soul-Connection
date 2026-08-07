@@ -5,9 +5,16 @@ const path = require('path');
 const { EventEmitter } = require('events');
 
 class XrayProcess extends EventEmitter {
-  constructor(xrayBinPath, workDir) {
+  // `assetDir` is where geoip.dat/geosite.dat live. Xray looks for them next
+  // to its own executable by default, which holds in the packaged layout but
+  // not in the repo, where the binaries sit in per-arch subfolders and the
+  // .dat files sit one level up in bin/. Without this, xray starts and then
+  // dies with "failed to load GeoIP: private" the moment a config uses a geo
+  // routing rule -- which every config here does.
+  constructor(xrayBinPath, workDir, assetDir = null) {
     super();
     this.xrayBinPath = xrayBinPath;
+    this.assetDir = assetDir;
     this.workDir = workDir;
     this.proc = null;
     this.configPath = path.join(workDir, 'active-config.json');
@@ -30,6 +37,9 @@ class XrayProcess extends EventEmitter {
       const proc = spawn(this.xrayBinPath, ['run', '-c', this.configPath], {
         cwd: path.dirname(this.xrayBinPath),
         windowsHide: true,
+        env: this.assetDir
+          ? { ...process.env, XRAY_LOCATION_ASSET: this.assetDir }
+          : process.env,
       });
       this.proc = proc;
 

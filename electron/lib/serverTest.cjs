@@ -168,7 +168,7 @@ async function pingStats(profile, opts = {}) {
 // collide with the live session (ports 10808+) or with each other.
 let nextTestPortBase = 24000;
 
-async function startTestTunnel(profile, { xrayBin, workRoot, signal }) {
+async function startTestTunnel(profile, { xrayBin, xrayAssetDir, workRoot, signal }) {
   throwIfAborted(signal);
   const base = nextTestPortBase;
   nextTestPortBase = base + 4 > 29000 ? 24000 : base + 4;
@@ -177,7 +177,7 @@ async function startTestTunnel(profile, { xrayBin, workRoot, signal }) {
   const workDir = path.join(workRoot, `test-${socksPort}-${Date.now()}`);
   const config = buildXrayConfig(profile, { socksPort, httpPort, mode: 'proxy', logLevel: 'warning' });
 
-  const xp = new XrayProcess(xrayBin, workDir);
+  const xp = new XrayProcess(xrayBin, workDir, xrayAssetDir);
   const bootStart = Date.now();
   const cleanup = async () => {
     try { await xp.stop(); } catch { /* ignore */ }
@@ -231,9 +231,9 @@ function probeViaProxy(httpPort, timeoutMs, signal) {
 
 // ---- Mode 2: real configuration ping ----
 
-async function realPing(profile, { xrayBin, workRoot, signal, emit = () => {}, warmCount = 5 } = {}) {
+async function realPing(profile, { xrayBin, xrayAssetDir, workRoot, signal, emit = () => {}, warmCount = 5 } = {}) {
   emit('phase', { phase: 'boot' });
-  const tunnel = await startTestTunnel(profile, { xrayBin, workRoot, signal });
+  const tunnel = await startTestTunnel(profile, { xrayBin, xrayAssetDir, workRoot, signal });
   try {
     throwIfAborted(signal);
     emit('phase', { phase: 'reach' });
@@ -456,9 +456,9 @@ async function measureUpload(httpPort, { bytes, signal, emit }) {
   });
 }
 
-async function speedTest(profile, { xrayBin, workRoot, signal, emit = () => {}, downloadMs = 8000 } = {}) {
+async function speedTest(profile, { xrayBin, xrayAssetDir, workRoot, signal, emit = () => {}, downloadMs = 8000 } = {}) {
   emit('phase', { phase: 'boot' });
-  const tunnel = await startTestTunnel(profile, { xrayBin, workRoot, signal });
+  const tunnel = await startTestTunnel(profile, { xrayBin, xrayAssetDir, workRoot, signal });
   try {
     // Warm the tunnel and grab its RTT while we're at it.
     emit('phase', { phase: 'warmup' });

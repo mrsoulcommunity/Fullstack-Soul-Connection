@@ -1,7 +1,7 @@
 {
   "name": "soul-connection",
   "productName": "Soul Connection",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "A modern V2Ray/Xray client for Windows",
   "main": "electron/main.cjs",
   "author": "Soul",
