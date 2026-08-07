@@ -24,6 +24,7 @@ function updaterStatusHint(updaterStatus) {
     case 'not-available': return 'شما از آخرین نسخه استفاده می‌کنید';
     case 'downloading': return `در حال دانلود… ${Math.round(updaterStatus.percent || 0)}٪`;
     case 'downloaded': return `نسخه‌ی ${updaterStatus.version} آماده‌ی نصب است`;
+    case 'installing': return 'در حال نصب… برنامه بسته و دوباره باز می‌شود';
     case 'error': return `خطا در بررسی به‌روزرسانی: ${updaterStatus.message}`;
     default: return null;
   }

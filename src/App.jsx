@@ -10,38 +10,60 @@ import { loadSession, saveSession, clearSession } from './utils/sessionState.js'
 
 const PING_CONCURRENCY = 12;
 
-// Update banner. The About section in Settings also exposes the same actions,
-// but a released update has to reach someone who never opens Settings -- so it
-// surfaces here, above whichever tab is showing, until acted on or dismissed.
-function UpdateBanner({ status, version, percent, onDownload, onInstall, onDismiss }) {
+// Update card, pinned to the bottom of the sidebar just above "افزودن کانفیگ".
+// The About section in Settings exposes the same actions, but a release has to
+// reach someone who never opens Settings -- so it surfaces here, in the corner
+// the eye already returns to, until acted on or dismissed.
+//
+// One click does the whole thing: download, then install and relaunch. Once
+// that click lands the card becomes a progress readout and stops being
+// clickable, so there's no way to fire a second install mid-flight.
+function UpdateCard({ status, version, percent, onUpdate, onDismiss }) {
   const downloading = status === 'downloading';
-  const ready = status === 'downloaded';
+  const installing = status === 'installing' || status === 'downloaded';
+  const failed = status === 'error';
+  const busy = downloading || installing;
+  const pct = Math.min(100, Math.max(0, Math.round(percent || 0)));
+
+  const hint = installing
+    ? 'در حال نصب… برنامه بسته و دوباره باز می‌شود'
+    : downloading
+      ? `در حال دانلود… ${pct}٪`
+      : failed
+        ? 'دانلود ناموفق بود — برای تلاش دوباره کلیک کنید'
+        : 'برای به‌روزرسانی خودکار کلیک کنید';
 
   return (
-    <div className={`update-banner ${ready ? 'ready' : ''}`}>
-      <Icon name={ready ? 'refresh' : 'arrowDown'} size={15} />
-      <div className="update-banner-text">
-        <span className="update-banner-title">
-          {ready ? `نسخه‌ی ${version} آماده‌ی نصب است` : `نسخه‌ی جدید ${version} موجود است`}
+    <div className={`update-card ${busy ? 'busy' : ''} ${failed ? 'failed' : ''}`}>
+      <button
+        type="button"
+        className="update-card-main"
+        onClick={busy ? undefined : onUpdate}
+        disabled={busy}
+        title={busy ? hint : `به‌روزرسانی به نسخه‌ی ${version}`}
+      >
+        <span className="update-card-glyph">
+          <Icon name={installing ? 'refresh' : failed ? 'refresh' : 'arrowDown'} size={15} />
         </span>
-        <span className="update-banner-hint">
-          {downloading
-            ? `در حال دانلود… ${Math.round(percent || 0)}٪`
-            : ready
-              ? 'برنامه بسته و دوباره باز می‌شود. سرورها و تنظیمات شما دست‌نخورده می‌مانند.'
-              : 'دانلود از مخزن گیت‌هاب Soul Connection'}
+        <span className="update-card-text">
+          <span className="update-card-title">
+            {busy ? `نسخه‌ی ${version}` : `نسخه‌ی ${version} موجود است`}
+          </span>
+          <span className="update-card-hint">{hint}</span>
         </span>
-      </div>
-      {ready ? (
-        <button className="btn primary" onClick={onInstall}>نصب و راه‌اندازی مجدد</button>
-      ) : (
-        <button className="btn primary" onClick={onDownload} disabled={downloading}>
-          {downloading ? 'در حال دانلود…' : 'دانلود'}
+      </button>
+
+      {downloading && (
+        <div className="update-card-progress" role="progressbar" aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}>
+          <div className="update-card-progress-fill" style={{ width: `${pct}%` }} />
+        </div>
+      )}
+
+      {!busy && (
+        <button className="update-card-dismiss" onClick={onDismiss} title="بعداً یادآوری کن">
+          <Icon name="close" size={12} />
         </button>
       )}
-      <button className="icon-btn ghost" onClick={onDismiss} title="بعداً">
-        <Icon name="close" size={14} />
-      </button>
     </div>
   );
 }
@@ -217,9 +239,13 @@ export default function App() {
       setUpdaterStatus(s);
       if (s.status === 'available' || s.status === 'downloaded') {
         setPendingUpdate(s.version);
-        // A check that turns up a release re-opens the banner even if an
+        // A check that turns up a release re-opens the card even if an
         // earlier one was dismissed -- the user asked for this answer.
         setUpdateDismissed(false);
+      } else if (s.status === 'not-available') {
+        // The release this card was offering is gone (pulled, or already
+        // installed) -- drop it rather than leave a dead offer on screen.
+        setPendingUpdate(null);
       }
     });
     return () => { offState(); offLatency(); offTraffic(); offProfiles(); offOpenSettings(); offUpdater(); };
@@ -590,6 +616,16 @@ export default function App() {
             onSessionChange={handleSessionChange}
           />
 
+          {pendingUpdate && !updateDismissed && (
+            <UpdateCard
+              status={updaterStatus?.status}
+              version={pendingUpdate}
+              percent={updaterStatus?.percent}
+              onUpdate={() => window.soul.downloadAndInstall()}
+              onDismiss={() => setUpdateDismissed(true)}
+            />
+          )}
+
           {profiles.length > 0 && (
             <footer className="sidebar-foot">
               <button className="btn primary add-btn" onClick={() => setShowAdd(true)}>
@@ -618,17 +654,6 @@ export default function App() {
               <Icon name={tab === 'settings' ? 'close' : 'settings'} size={16} />
             </button>
           </header>
-
-          {pendingUpdate && !updateDismissed && (
-            <UpdateBanner
-              status={updaterStatus?.status}
-              version={pendingUpdate}
-              percent={updaterStatus?.percent}
-              onDownload={() => window.soul.downloadUpdate()}
-              onInstall={() => window.soul.installUpdate()}
-              onDismiss={() => setUpdateDismissed(true)}
-            />
-          )}
 
           {tab === 'servers' ? (
             <ConnectHero

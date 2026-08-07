@@ -31,6 +31,7 @@ contextBridge.exposeInMainWorld('soul', {
   getAppInfo: () => ipcRenderer.invoke('app:getInfo'),
   checkForUpdates: () => ipcRenderer.invoke('updater:check'),
   downloadUpdate: () => ipcRenderer.invoke('updater:download'),
+  downloadAndInstall: () => ipcRenderer.invoke('updater:downloadAndInstall'),
   installUpdate: () => ipcRenderer.invoke('updater:install'),
   exportBackup: () => ipcRenderer.invoke('app:exportBackup'),
   importBackup: () => ipcRenderer.invoke('app:importBackup'),

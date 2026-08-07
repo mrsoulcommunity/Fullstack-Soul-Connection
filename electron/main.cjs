@@ -26,7 +26,7 @@ const { JsonStore } = require('./lib/store.cjs');
 const { findFreePort } = require('./lib/freePort.cjs');
 const { isElevated, relaunchElevated } = require('./lib/elevation.cjs');
 const { StatsClient } = require('./lib/statsApi.cjs');
-const { initUpdater, checkForUpdates, downloadUpdate, quitAndInstall } = require('./lib/updater.cjs');
+const { initUpdater, checkForUpdates, downloadUpdate, downloadAndInstall, quitAndInstall } = require('./lib/updater.cjs');
 
 const SOCKS_PORT = 10808;
 const HTTP_PORT = 10809;
@@ -642,6 +642,7 @@ app.whenReady().then(async () => {
       'نسخه‌ی جدید موجود است',
       `Soul Connection ${version} منتشر شد. برای دانلود و نصب، برنامه را باز کنید.`
     ),
+    onReadyToInstall: installUpdate,
   });
   if (app.isPackaged) {
     // One check shortly after launch, then every 6 hours, so a release that
@@ -684,6 +685,41 @@ app.whenReady().then(async () => {
     else mainWindow.show();
   });
 });
+
+// Hand off to the NSIS installer, but only once the machine is back in a
+// clean state. The installer replaces the app's files and restarts it, so
+// anything still live at that moment is a problem: an xray process holding
+// the proxy port, a WinINET system-proxy pointing at 127.0.0.1, or a Kill
+// Switch firewall rule would all outlive the app that owns them. Tear the
+// tunnel down first, persist the store synchronously, and only then quit.
+let installingUpdate = false;
+async function installUpdate() {
+  // Reachable from two directions -- the card's one-click flow and the button
+  // in Settings -- and the teardown below is async, so without this a second
+  // click during the disconnect would spawn setup.exe twice.
+  if (installingUpdate) return;
+  installingUpdate = true;
+  isQuitting = true;
+  try {
+    if (connectionState !== 'disconnected') {
+      await serialize(disconnect);
+    }
+  } catch (e) {
+    console.error('Failed to disconnect before installing the update:', e);
+    // Fall through: leaving the user stuck on an old version is worse than a
+    // disconnect that didn't fully report success. disconnect() is itself
+    // defensive, and the safety net below covers the proxy either way.
+  }
+
+  // Belt and braces -- if the tunnel teardown above threw partway, make sure
+  // the system proxy isn't left pointing at a port nothing is listening on.
+  try {
+    if (store.get('systemProxyEnabled', false)) await systemProxy.disable();
+  } catch { /* best effort */ }
+
+  store.flush();
+  quitAndInstall();
+}
 
 app.on('before-quit', () => {
   isQuitting = true;
@@ -1177,7 +1213,8 @@ ipcMain.handle('app:getInfo', () => ({
 
 ipcMain.handle('updater:check', () => checkForUpdates());
 ipcMain.handle('updater:download', () => downloadUpdate());
-ipcMain.handle('updater:install', () => quitAndInstall());
+ipcMain.handle('updater:downloadAndInstall', () => downloadAndInstall());
+ipcMain.handle('updater:install', () => installUpdate());
 
 ipcMain.handle('profiles:resetUsage', (_e, id) => {
   const profiles = store.get('profiles', []);

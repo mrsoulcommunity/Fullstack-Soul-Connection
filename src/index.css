@@ -688,29 +688,80 @@ button:disabled { cursor: default; }
   color: var(--text-faint);
 }
 
-/* Update banner -- sits between the main header and the active tab. Uses the
-   warm "attention" hue while an update is merely available, and switches to
-   the signal teal once it's downloaded and one click from being installed. */
-.update-banner {
+/* Update card -- pinned to the bottom of the sidebar, directly above the
+   "افزودن کانفیگ" footer. Carries the signal teal so it reads as an
+   opportunity rather than a warning, and stays quiet enough not to compete
+   with the connect button for attention. */
+.update-card {
+  position: relative;
   flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 12px 20px 0;
-  padding: 11px 14px;
-  border: 1px solid rgba(240, 182, 74, 0.35);
+  margin: 0 14px 10px;
+  border: 1px solid rgba(53, 224, 192, 0.28);
   border-radius: var(--radius-md);
-  background: rgba(240, 182, 74, 0.08);
-  color: var(--warn);
+  background: linear-gradient(135deg, rgba(53, 224, 192, 0.13), rgba(53, 224, 192, 0.05));
+  overflow: hidden;
+  animation: update-card-in 0.35s cubic-bezier(0.2, 0.8, 0.3, 1);
 }
 
-.update-banner.ready {
-  border-color: rgba(53, 224, 192, 0.35);
-  background: var(--signal-tint);
+@keyframes update-card-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-card { animation: none; }
+}
+
+.update-card.failed {
+  border-color: rgba(239, 90, 111, 0.35);
+  background: rgba(239, 90, 111, 0.08);
+}
+
+.update-card-main {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 12px;
+  background: none;
+  border: none;
+  text-align: right;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.update-card-main:hover:not(:disabled) { background: rgba(53, 224, 192, 0.08); }
+.update-card-main:disabled { cursor: default; }
+
+.update-card-glyph {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: rgba(53, 224, 192, 0.16);
   color: var(--signal);
 }
 
-.update-banner-text {
+.update-card.failed .update-card-glyph {
+  background: rgba(239, 90, 111, 0.16);
+  color: var(--danger);
+}
+
+/* Spin the glyph only while the install is actually handing off, so motion
+   means "something is happening" and nothing else. */
+.update-card.busy .update-card-glyph svg { animation: update-spin 1.4s linear infinite; }
+
+@keyframes update-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .update-card.busy .update-card-glyph svg { animation: none; }
+}
+
+.update-card-text {
   flex: 1;
   min-width: 0;
   display: flex;
@@ -718,21 +769,53 @@ button:disabled { cursor: default; }
   gap: 2px;
 }
 
-.update-banner-title {
-  font-size: 12.5px;
-  font-weight: 600;
+.update-card-title {
+  font-size: 12px;
+  font-weight: 700;
   color: var(--text);
 }
 
-.update-banner-hint {
-  font-size: 11px;
+.update-card-hint {
+  font-size: 10.5px;
   color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.update-banner .btn {
-  flex: none;
-  padding: 8px 16px;
+.update-card-progress {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.06);
 }
+
+.update-card-progress-fill {
+  height: 100%;
+  background: var(--signal);
+  transition: width 0.25s ease-out;
+}
+
+/* Sits in the corner the title bar's close button doesn't own -- the sidebar
+   is RTL, so "inset-inline-end" lands it on the left edge of the card. */
+.update-card-dismiss {
+  position: absolute;
+  top: 6px;
+  inset-inline-end: 6px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+
+.update-card:hover .update-card-dismiss { opacity: 1; }
+.update-card-dismiss:hover { color: var(--text); }
+.update-card-dismiss:focus-visible { opacity: 1; }
 
 .icon-btn.ghost {
   background: none;

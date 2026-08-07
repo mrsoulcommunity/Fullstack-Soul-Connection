@@ -89,6 +89,24 @@ export function installDevMock() {
 
   const emitState = () => listeners.state.forEach((fn) => fn({ ...state, systemProxyEnabled }));
   const emitUpdater = (payload) => listeners.updater.forEach((fn) => fn(payload));
+
+  // Mirrors the real status sequence: downloading (with progress) -> downloaded,
+  // and when `thenInstall` is set, straight on to installing -- the one-click
+  // path the update card uses.
+  const runMockDownload = (thenInstall) => {
+    let percent = 0;
+    emitUpdater({ status: 'downloading', percent });
+    const timer = setInterval(() => {
+      percent += 12;
+      if (percent >= 100) {
+        clearInterval(timer);
+        emitUpdater({ status: 'downloaded', version: '2.1.0' });
+        if (thenInstall) setTimeout(() => emitUpdater({ status: 'installing' }), 300);
+      } else {
+        emitUpdater({ status: 'downloading', percent });
+      }
+    }, 250);
+  };
   const on = (key) => (fn) => {
     listeners[key].push(fn);
     return () => listeners[key].splice(listeners[key].indexOf(fn), 1);
@@ -231,19 +249,9 @@ export function installDevMock() {
       emitUpdater({ status: 'checking' });
       setTimeout(() => emitUpdater({ status: 'available', version: '2.1.0' }), 700);
     },
-    downloadUpdate: () => {
-      let percent = 0;
-      const timer = setInterval(() => {
-        percent += 12;
-        if (percent >= 100) {
-          clearInterval(timer);
-          emitUpdater({ status: 'downloaded', version: '2.1.0' });
-        } else {
-          emitUpdater({ status: 'downloading', percent });
-        }
-      }, 250);
-    },
-    installUpdate: () => {},
+    downloadUpdate: () => runMockDownload(false),
+    downloadAndInstall: () => runMockDownload(true),
+    installUpdate: () => emitUpdater({ status: 'installing' }),
     openLogsFolder: () => {},
     openProxyFolder: () => {},
 
