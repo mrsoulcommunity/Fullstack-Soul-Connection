@@ -59,4 +59,37 @@ async function disable() {
   await broadcastSettingsChange();
 }
 
-module.exports = { enable, disable, buildBypass };
+// Reads what Windows currently has configured. Returns null for values that
+// aren't set, so callers can tell "no proxy" from "a proxy we can't parse".
+async function read() {
+  const out = { enabled: false, server: '', host: null, port: null };
+  try {
+    const enableOut = await run(['query', REG_KEY, '/v', 'ProxyEnable']);
+    out.enabled = /ProxyEnable\s+REG_DWORD\s+0x1/i.test(enableOut);
+  } catch {
+    return out; // value missing entirely == no proxy
+  }
+  try {
+    const serverOut = await run(['query', REG_KEY, '/v', 'ProxyServer']);
+    const m = serverOut.match(/ProxyServer\s+REG_SZ\s+(.*)/i);
+    out.server = m ? m[1].trim() : '';
+  } catch { /* no ProxyServer value */ }
+
+  // Accepts both forms we might meet: the per-protocol string enable() writes
+  // ("http=127.0.0.1:10809;https=..."), and a bare "host:port".
+  const first = out.server.split(';')[0] || '';
+  const hostPort = first.includes('=') ? first.split('=')[1] : first;
+  const hm = (hostPort || '').match(/^\[?([^\]]*)\]?:(\d+)$/);
+  if (hm) {
+    out.host = hm[1];
+    out.port = Number(hm[2]);
+  }
+  return out;
+}
+
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '::1', '0.0.0.0']);
+function isLoopback(host) {
+  return LOOPBACK.has(String(host || '').trim().toLowerCase());
+}
+
+module.exports = { enable, disable, buildBypass, read, isLoopback };

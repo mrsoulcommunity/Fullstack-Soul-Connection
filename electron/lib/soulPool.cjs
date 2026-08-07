@@ -112,9 +112,13 @@ function diversifyByHost(ranked) {
 }
 
 class SoulPool {
-  constructor({ store, xrayBin, workRoot }) {
+  constructor({ store, xrayBin, xrayAssetDir, workRoot }) {
     this.store = store;
     this.xrayBin = xrayBin;
+    // Must be forwarded to every test tunnel: without it xray can't find
+    // geoip.dat, dies on boot, and *every* candidate looks unusable -- which
+    // silently demotes the whole selection to the ping-only fallback.
+    this.xrayAssetDir = xrayAssetDir;
     this.workRoot = workRoot;
   }
 
@@ -204,6 +208,7 @@ class SoulPool {
       try {
         const r = await realPing(profile, {
           xrayBin: this.xrayBin,
+          xrayAssetDir: this.xrayAssetDir,
           workRoot: this.workRoot,
           signal,
           warmCount: samples,

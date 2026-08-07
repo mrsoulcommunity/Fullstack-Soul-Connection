@@ -25,7 +25,26 @@ function streamSettings(p) {
 
   switch (p.network) {
     case 'ws':
-      s.wsSettings = { path: p.path || '/', headers: p.host ? { Host: p.host } : {} };
+      // `host` is the current field. Passing the Host header inside `headers`
+      // still works but xray logs a deprecation warning for every connection,
+      // and the field is slated for removal.
+      s.wsSettings = { path: p.path || '/', host: p.host || undefined };
+      break;
+    // XHTTP (and the older names it replaced). Without these cases the network
+    // was set on the stream but no settings object was emitted, so xray fell
+    // back to defaults and ignored the server's path/host/mode entirely -- the
+    // tunnel came up and then no traffic passed through it.
+    case 'xhttp':
+    case 'splithttp':
+      s.network = 'xhttp';
+      s.xhttpSettings = {
+        path: p.path || '/',
+        host: p.host || undefined,
+        mode: p.mode || 'auto',
+      };
+      break;
+    case 'httpupgrade':
+      s.httpupgradeSettings = { path: p.path || '/', host: p.host || undefined };
       break;
     case 'grpc':
       s.grpcSettings = { serviceName: p.serviceName || '', multiMode: p.mode === 'multi' };

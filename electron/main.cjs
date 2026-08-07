@@ -2,6 +2,7 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notification, dialog, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const net = require('net');
 
 // Windows/Electron quirk: when launched from a UAC elevation prompt (portable
 // build run as administrator, or the app's own relaunchElevated() for tunnel
@@ -541,6 +542,58 @@ async function connect(profileId) {
   }
 }
 
+// Is anything accepting connections on this loopback port right now?
+function portAccepts(host, port, timeoutMs = 700) {
+  return new Promise((resolve) => {
+    const socket = new net.Socket();
+    let done = false;
+    const finish = (ok) => { if (!done) { done = true; socket.destroy(); resolve(ok); } };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('error', () => finish(false));
+    socket.once('timeout', () => finish(false));
+    socket.connect(port, host);
+  });
+}
+
+// See the call site in whenReady for why this exists. Deliberately narrow:
+// it clears a stranded proxy, never a working or third-party one.
+async function reconcileSystemProxy() {
+  if (connectionState !== 'disconnected') return;
+
+  let current;
+  try {
+    current = await systemProxy.read();
+  } catch {
+    return; // can't read the registry -- do nothing rather than guess
+  }
+  if (!current.enabled || !current.port) {
+    // Nothing enabled: make sure our own bookkeeping agrees, so the UI toggle
+    // doesn't claim system proxy is on when Windows says otherwise.
+    if (store.get('systemProxyEnabled', false)) store.set('systemProxyEnabled', false);
+    return;
+  }
+
+  if (!systemProxy.isLoopback(current.host)) return; // not ours
+
+  const settings = getSettings();
+  const ourPorts = new Set([settings.httpPort, settings.socksPort, HTTP_PORT, SOCKS_PORT]);
+  if (!ourPorts.has(current.port)) return; // loopback, but not a port we use
+
+  // Last check before touching anything: if something is actually serving
+  // there, the proxy is live and must be left in place.
+  if (await portAccepts(dialHost(current.host), current.port)) return;
+
+  try {
+    await systemProxy.disable();
+    store.set('systemProxyEnabled', false);
+    notify(
+      'پروکسی سیستم پاک شد',
+      'پروکسی سیستم روی پورت خاموش برنامه مانده بود و اینترنت را قطع می‌کرد. برطرف شد.'
+    );
+  } catch { /* best effort */ }
+}
+
 // Safety net: a dead local proxy port left as the active Windows system proxy
 // means no internet for the user, so any time the tunnel actually stops we
 // clear system proxy too. This is distinct from systemProxy:disable, which
@@ -719,6 +772,17 @@ app.whenReady().then(async () => {
       sendState();
     }).catch(() => {});
   }
+
+  // A crash, a force-quit, or a machine that lost power while connected leaves
+  // Windows still pointed at our loopback proxy port with nothing listening on
+  // it -- and then *nothing* on the machine has internet, which looks exactly
+  // like "every server is broken". The normal disconnect path clears this, but
+  // by definition none of those endings run it.
+  //
+  // Only ever touches a proxy that is unmistakably ours: loopback host, our own
+  // configured port, and nothing accepting connections there right now. A proxy
+  // the user set up for anything else is left strictly alone.
+  reconcileSystemProxy().catch(() => {});
 
   if (settings.runLocalProxyOnStartup) {
     const profileId = store.get('activeProfileId');
