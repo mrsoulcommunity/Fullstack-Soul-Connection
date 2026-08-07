@@ -506,4 +506,4 @@ async function speedTest(profile, { xrayBin, workRoot, signal, emit = () => {}, 
   }
 }
 
-module.exports = { begin, end, cancel, pingStats, realPing, speedTest };
+module.exports = { begin, end, cancel, pingStats, tcpPingStats, realPing, speedTest };

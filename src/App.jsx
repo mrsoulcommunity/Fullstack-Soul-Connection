@@ -5,6 +5,7 @@ import ConnectHero from './components/ConnectHero.jsx';
 import StatusBar from './components/StatusBar.jsx';
 import SettingsView from './components/SettingsView.jsx';
 import ServerFinder from './components/ServerFinder.jsx';
+import SoulPoolEntry from './components/SoulPoolEntry.jsx';
 import Icon from './components/Icon.jsx';
 import { loadSession, saveSession, clearSession } from './utils/sessionState.js';
 
@@ -122,6 +123,13 @@ export default function App() {
   const [updaterStatus, setUpdaterStatus] = useState(null);
   // Version carried across the whole download flow: only 'available' and
   // 'downloaded' events carry it, 'downloading' progress events don't.
+  // Soul Connection pool: `soulMode` is the selection, `soulProgress` is the
+  // live sweep readout (null whenever nothing is running).
+  const [soulMode, setSoulMode] = useState(false);
+  const [soulCount, setSoulCount] = useState(0);
+  const [soulProgress, setSoulProgress] = useState(null);
+  const [activeSoulProfile, setActiveSoulProfile] = useState(null);
+  const [soulRefreshing, setSoulRefreshing] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState(null);
   const [updateDismissed, setUpdateDismissed] = useState(false);
   const [pings, setPings] = useState({});
@@ -159,6 +167,19 @@ export default function App() {
     setSettings(data.settings);
     setSystemProxyEnabled(data.systemProxyEnabled);
     setKillSwitchBlocking(!!data.killSwitchBlocking);
+    setSoulMode(!!data.soulModeEnabled);
+    setSoulCount(data.soulCount || 0);
+    setActiveSoulProfile(data.activeSoulProfile || null);
+  }, []);
+
+  // Warm the pool list in the background on first paint so the sidebar can
+  // show a real server count, and so the first connect skips the fetch.
+  useEffect(() => {
+    let cancelled = false;
+    window.soul.soulList?.()
+      .then((r) => { if (!cancelled && r) setSoulCount(r.count); })
+      .catch(() => { /* offline; the count just stays at 0 until connect */ });
+    return () => { cancelled = true; };
   }, []);
 
   // Ctrl+K (or Ctrl+F) opens the server finder from anywhere.
@@ -219,17 +240,25 @@ export default function App() {
   useEffect(() => {
     refresh();
     window.soul.getAppInfo().then(setAppInfo).catch(() => {});
-    const offState = window.soul.onStateChanged(({ connectionState, activeProfileId, connectedAt, systemProxyEnabled, killSwitchBlocking }) => {
+    const offState = window.soul.onStateChanged(({ connectionState, activeProfileId, connectedAt, systemProxyEnabled, killSwitchBlocking, soulModeEnabled, activeSoulProfile }) => {
       setConnectionState(connectionState);
       setActiveProfileId(activeProfileId);
       setConnectedAt(connectedAt);
       setSystemProxyEnabled(systemProxyEnabled);
       setKillSwitchBlocking(!!killSwitchBlocking);
+      setSoulMode(!!soulModeEnabled);
+      setActiveSoulProfile(activeSoulProfile || null);
       if (connectionState !== 'connected') {
         setLatencyMs(null);
         setTraffic(null);
         refresh(); // picks up the just-persisted lifetime usage total
       }
+    });
+    const offSoul = window.soul.onSoulProgress?.((p) => {
+      setSoulProgress(p);
+      // 'done' leaves the winning server on screen; a cancel (error with no
+      // message) just clears the row back to its idle state.
+      if (p.phase === 'error' && !p.message) setSoulProgress(null);
     });
     const offLatency = window.soul.onLatencyUpdate(({ ms }) => setLatencyMs(ms));
     const offTraffic = window.soul.onTrafficUpdate((data) => setTraffic(data));
@@ -248,7 +277,10 @@ export default function App() {
         setPendingUpdate(null);
       }
     });
-    return () => { offState(); offLatency(); offTraffic(); offProfiles(); offOpenSettings(); offUpdater(); };
+    return () => {
+      offState(); offLatency(); offTraffic(); offProfiles(); offOpenSettings(); offUpdater();
+      if (offSoul) offSoul();
+    };
   }, [refresh]);
 
   // "Restore Previous Session": persist the active tab whenever it changes,
@@ -294,6 +326,10 @@ export default function App() {
     try {
       if (connectionState === 'connected' || connectionState === 'connecting') {
         await window.soul.disconnect();
+      } else if (soulMode) {
+        // The pool picks the server; this is the whole point of the mode.
+        setSoulProgress({ phase: 'fetching' });
+        await window.soul.soulConnectBest();
       } else {
         if (!activeProfileId) {
           showToast('اول یک کانفیگ را انتخاب کن');
@@ -307,9 +343,47 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [busy, connectionState, activeProfileId, showToast]);
+  }, [busy, connectionState, activeProfileId, soulMode, showToast]);
+
+  // Selecting the pool row. Toggling it off falls back to manual selection;
+  // doing either mid-sweep cancels the sweep rather than queueing behind it.
+  const handleSoulSelect = useCallback(async () => {
+    try {
+      if (connectionState === 'connecting') {
+        await window.soul.soulCancel();
+        setSoulProgress(null);
+        return;
+      }
+      const next = !soulMode;
+      await window.soul.soulSetEnabled(next);
+      setSoulMode(next);
+      if (!next) setSoulProgress(null);
+    } catch (err) {
+      showToast(err.message || 'خطا', 'error');
+    }
+  }, [soulMode, connectionState, showToast]);
+
+  const handleSoulRefresh = useCallback(async () => {
+    setSoulRefreshing(true);
+    try {
+      const r = await window.soul.soulList(true);
+      setSoulCount(r.count);
+      showToast(`${r.count} سرور سول کانکشن به‌روزرسانی شد`);
+    } catch (err) {
+      showToast(err.message || 'خطا در دریافت فهرست', 'error');
+    } finally {
+      setSoulRefreshing(false);
+    }
+  }, [showToast]);
 
   const handleSelect = useCallback(async (id) => {
+    // Picking a server by hand leaves pool mode. Main does the same on its
+    // side when connecting, but this keeps the sidebar honest while idle.
+    if (soulMode) {
+      setSoulMode(false);
+      setSoulProgress(null);
+      window.soul.soulSetEnabled(false).catch(() => {});
+    }
     if (connectionState === 'connected' || connectionState === 'connecting') {
       setBusy(true);
       try {
@@ -322,7 +396,7 @@ export default function App() {
     } else {
       setActiveProfileId(id);
     }
-  }, [connectionState, showToast]);
+  }, [connectionState, soulMode, showToast]);
 
   const handleDelete = useCallback(async (id) => {
     const updated = await window.soul.deleteProfile(id);
@@ -563,9 +637,13 @@ export default function App() {
     }
   }, [showToast]);
 
+  // A pool server isn't in `profiles`, so fall back to the copy main ships
+  // with the state payload -- otherwise the hero would claim no server is
+  // selected while the tunnel is up on a pool server.
   const activeProfile = useMemo(
-    () => profiles.find((p) => p.id === activeProfileId),
-    [profiles, activeProfileId]
+    () => profiles.find((p) => p.id === activeProfileId)
+      || (activeSoulProfile && activeSoulProfile.id === activeProfileId ? activeSoulProfile : undefined),
+    [profiles, activeProfileId, activeSoulProfile]
   );
 
   return (
@@ -587,6 +665,18 @@ export default function App() {
               </span>
             </div>
           </header>
+
+          <SoulPoolEntry
+            enabled={soulMode}
+            count={soulCount}
+            connectionState={connectionState}
+            progress={soulProgress}
+            activeSoulProfile={activeSoulProfile}
+            busy={busy && connectionState !== 'connecting'}
+            refreshing={soulRefreshing}
+            onSelect={handleSoulSelect}
+            onRefresh={handleSoulRefresh}
+          />
 
           <ServerList
             profiles={profiles}

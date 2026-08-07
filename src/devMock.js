@@ -55,7 +55,13 @@ export function installDevMock() {
     killSwitchBlocking: false,
   };
   let killSwitchArmed = false;
-  const listeners = { state: [], latency: [], traffic: [], profiles: [], settings: [], updater: [], test: [], proxyLog: [] };
+  const listeners = { state: [], latency: [], traffic: [], profiles: [], settings: [], updater: [], test: [], proxyLog: [], soul: [] };
+  // Soul Connection pool, mocked: enough to drive the sidebar row through
+  // fetch -> probe -> tunnel-test -> connect without a backend.
+  let soulModeEnabled = false;
+  let activeSoulProfile = null;
+  let soulCancelled = false;
+  const SOUL_COUNT = 32;
   const cancelled = new Set();
   let proxyLogRing = [];
   let proxyLogTimer = null;
@@ -87,7 +93,10 @@ export function installDevMock() {
   let latencyTimer = null;
   let sessionTotal = 0;
 
-  const emitState = () => listeners.state.forEach((fn) => fn({ ...state, systemProxyEnabled }));
+  const emitState = () => listeners.state.forEach((fn) => fn({
+    ...state, systemProxyEnabled, soulModeEnabled, activeSoulProfile,
+  }));
+  const emitSoul = (payload) => listeners.soul.forEach((fn) => fn(payload));
   const emitUpdater = (payload) => listeners.updater.forEach((fn) => fn(payload));
 
   // Mirrors the real status sequence: downloading (with progress) -> downloaded,
@@ -145,6 +154,9 @@ export function installDevMock() {
       profiles, subscriptions, ...state,
       settings,
       systemProxyEnabled,
+      soulModeEnabled,
+      soulCount: SOUL_COUNT,
+      activeSoulProfile,
     }),
     getAppInfo: async () => ({ version: '2.0.0-dev', xrayVersion: '25.1.30' }),
     connect: async (id) => {
@@ -382,5 +394,58 @@ export function installDevMock() {
     onOpenSettings: on('settings'),
     onUpdaterStatus: on('updater'),
     onTestEvent: on('test'),
+
+    soulList: async (force) => {
+      if (force) await new Promise((r) => setTimeout(r, 600));
+      return { count: SOUL_COUNT, fetchedAt: Date.now() };
+    },
+    soulSetEnabled: async (enabled) => {
+      soulModeEnabled = !!enabled;
+      // Mirrors main: only entering pool mode while idle touches the
+      // selection, and leaving it pushes no state at all.
+      if (soulModeEnabled && state.connectionState === 'disconnected') {
+        state = { ...state, activeProfileId: null };
+        emitState();
+      }
+      return { soulModeEnabled };
+    },
+    soulCancel: async () => { soulCancelled = true; return true; },
+    soulConnectBest: async () => {
+      soulCancelled = false;
+      const step = async (ms) => {
+        await new Promise((r) => setTimeout(r, ms));
+        if (soulCancelled) throw Object.assign(new Error('لغو شد'), { code: 'ABORTED' });
+      };
+      state = { ...state, connectionState: 'connecting' };
+      emitState();
+      try {
+        emitSoul({ phase: 'fetching' });
+        await step(400);
+        for (let done = 4; done <= SOUL_COUNT; done += 4) {
+          emitSoul({ phase: 'probing', done, total: SOUL_COUNT });
+          await step(180);
+        }
+        for (let done = 1; done <= 4; done += 1) {
+          emitSoul({ phase: 'testing', done, total: 4 });
+          await step(500);
+        }
+        const winner = { id: 'soul-best', name: '[Reality-Tunnel-Google-01]', address: '141.98.118.70', port: 443, protocol: 'vless' };
+        emitSoul({ phase: 'connecting', server: winner.name });
+        await step(500);
+        activeSoulProfile = winner;
+        state = { ...state, activeProfileId: winner.id, connectionState: 'connected', connectedAt: Date.now() };
+        emitState();
+        startTelemetry();
+        emitSoul({ phase: 'done', server: winner.name, avg: 148, jitter: 12, loss: 0, tested: 4, alive: 27, total: SOUL_COUNT });
+        return { connectionState: state.connectionState };
+      } catch (err) {
+        state = { ...state, connectionState: 'disconnected' };
+        emitState();
+        emitSoul({ phase: 'error', message: err.code === 'ABORTED' ? null : err.message });
+        if (err.code === 'ABORTED') return { cancelled: true };
+        throw err;
+      }
+    },
+    onSoulProgress: on('soul'),
   };
 }

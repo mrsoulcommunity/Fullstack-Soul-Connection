@@ -27,6 +27,7 @@ const { findFreePort } = require('./lib/freePort.cjs');
 const { isElevated, relaunchElevated } = require('./lib/elevation.cjs');
 const { StatsClient } = require('./lib/statsApi.cjs');
 const { initUpdater, checkForUpdates, downloadUpdate, downloadAndInstall, quitAndInstall } = require('./lib/updater.cjs');
+const { SoulPool } = require('./lib/soulPool.cjs');
 
 const SOCKS_PORT = 10808;
 const HTTP_PORT = 10809;
@@ -84,6 +85,10 @@ const xrayBin = app.isPackaged
 const xrayWorkDir = path.join(userDataDir, 'xray-run');
 
 const xray = new XrayProcess(xrayBin, xrayWorkDir);
+
+// Same work root the manual server tests use -- startTestTunnel() already
+// carves a throwaway per-test subdirectory out of it.
+const soulPool = new SoulPool({ store, xrayBin, workRoot: xrayWorkDir });
 
 // Local proxy log panel (Network settings): keep a capped ring buffer so a
 // freshly opened panel isn't empty, and forward each line live.
@@ -159,6 +164,13 @@ function notify(title, body) {
   } catch { /* ignore */ }
 }
 
+// The active profile only when it came from the pool -- user profiles are
+// already in the renderer's own list and don't need shipping over IPC.
+function soulActiveProfile() {
+  const p = soulPool.find(store.get('activeProfileId'));
+  return p ? { id: p.id, name: p.name, address: p.address, port: p.port, protocol: p.protocol } : null;
+}
+
 function sendState() {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('state-changed', {
@@ -167,6 +179,10 @@ function sendState() {
       connectedAt,
       systemProxyEnabled: store.get('systemProxyEnabled', false),
       killSwitchBlocking,
+      soulModeEnabled: store.get('soulModeEnabled', false),
+      // The pool server we landed on, so the UI can name it without holding a
+      // copy of the whole pool.
+      activeSoulProfile: soulActiveProfile(),
     });
   }
   updateTray();
@@ -430,8 +446,11 @@ function createTray() {
   }
 }
 
+// Soul Connection pool servers are connectable but live outside the user's
+// own list (see soulPool.cjs), so every lookup that resolves an id to a
+// profile has to consider both. This is the single place that happens.
 function findProfile(id) {
-  return store.get('profiles', []).find((p) => p.id === id);
+  return store.get('profiles', []).find((p) => p.id === id) || soulPool.find(id);
 }
 
 // The address the app itself must dial to reach its own local proxy. The
@@ -604,6 +623,23 @@ xray.on('exit', async () => {
   reconnectAttempts++;
   notify('اتصال قطع شد', `در حال تلاش برای اتصال مجدد (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})…`);
   await new Promise((r) => setTimeout(r, 2000 * reconnectAttempts));
+
+  // In pool mode the server was chosen because it was the best one *at the
+  // time*. If it just died, retrying it is the one thing guaranteed not to
+  // work -- re-run the selection and land on whatever is healthy now.
+  if (store.get('soulModeEnabled', false) && soulPool.find(profileId)) {
+    try {
+      await connectBestSoul();
+      if (store.get('systemProxyEnabled', false) && currentPorts) {
+        try {
+          const s = getSettings();
+          await systemProxy.enable(dialHost(s.httpHost), currentPorts.httpPort, systemProxy.buildBypass(s.customBypass));
+        } catch { /* ignore */ }
+      }
+    } catch { /* the retry cap above still governs how often this repeats */ }
+    return;
+  }
+
   try {
     await serialize(() => connect(profileId));
     // A successful reconnect can land on a different port than before (port
@@ -763,6 +799,9 @@ ipcMain.handle('profiles:list', () => ({
   settings: getSettings(),
   systemProxyEnabled: store.get('systemProxyEnabled', false),
   killSwitchBlocking,
+  soulModeEnabled: store.get('soulModeEnabled', false),
+  soulCount: soulPool.list().length,
+  activeSoulProfile: soulActiveProfile(),
 }));
 
 ipcMain.handle('settings:setMode', async (_e, mode) => {
@@ -975,14 +1014,113 @@ ipcMain.handle('subscriptions:update', (_e, { id, name, url }) => {
 });
 
 ipcMain.handle('connection:connect', async (_e, profileId) => {
+  // Connecting to a specific server by hand is an explicit exit from "let the
+  // pool choose" -- otherwise the next connect would silently override the
+  // server the user just picked.
+  cancelSoulSelection();
+  if (store.get('soulModeEnabled', false) && !soulPool.find(profileId)) {
+    store.set('soulModeEnabled', false);
+  }
   await serialize(() => connect(profileId));
   return { connectionState };
 });
 
 ipcMain.handle('connection:disconnect', async () => {
+  // Cancels a selection sweep in flight too -- otherwise "disconnect" would
+  // leave probes and test tunnels running and then connect anyway.
+  cancelSoulSelection();
   await serialize(disconnect);
   return { connectionState };
 });
+
+// ---- Soul Connection server pool ----
+
+let soulSelection = null; // AbortController while a sweep is running
+
+function cancelSoulSelection() {
+  if (soulSelection) {
+    soulSelection.abort();
+    soulSelection = null;
+  }
+}
+
+function sendSoulProgress(payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('soul-progress', payload);
+  }
+}
+
+ipcMain.handle('soul:list', async (_e, { force = false } = {}) => {
+  const profiles = await soulPool.refresh({ force });
+  return { count: profiles.length, fetchedAt: store.get('soulProfilesFetchedAt', 0) };
+});
+
+ipcMain.handle('soul:setEnabled', (_e, enabled) => {
+  const on = !!enabled;
+  store.set('soulModeEnabled', on);
+
+  // Entering pool mode while idle drops the manual selection, so the connect
+  // button can't show one server while the pool is about to pick another.
+  // While *connected*, activeProfileId still names the live server -- the
+  // tray, traffic accounting and disconnect all read it -- so it stays put
+  // and the switch happens on the next connect instead.
+  if (on && connectionState === 'disconnected') {
+    store.set('activeProfileId', null);
+    sendState();
+  }
+
+  // Deliberately no sendState() when leaving pool mode: main changes nothing
+  // the renderer doesn't already know, and while disconnected main's
+  // activeProfileId is intentionally stale (a manual pick isn't persisted
+  // until connect) -- pushing it here would overwrite the selection the user
+  // just made in the sidebar.
+  return { soulModeEnabled: on };
+});
+
+ipcMain.handle('soul:cancel', () => {
+  cancelSoulSelection();
+  return true;
+});
+
+// Test, rank, then connect to the winner. Deliberately NOT wrapped in
+// serialize() for its whole duration: the sweep can take ten seconds or more,
+// and holding the connection lock that long would block disconnect and leave
+// the user unable to cancel. Only the actual connect() takes the lock.
+async function connectBestSoul() {
+  if (soulSelection) throw new Error('انتخاب سرور از قبل در جریان است');
+
+  const controller = new AbortController();
+  soulSelection = controller;
+  connectionState = 'connecting';
+  sendState();
+
+  try {
+    const { profile, metrics } = await soulPool.selectBest({
+      signal: controller.signal,
+      emit: sendSoulProgress,
+    });
+    if (controller.signal.aborted) throw Object.assign(new Error('لغو شد'), { code: 'ABORTED' });
+
+    sendSoulProgress({ phase: 'connecting', server: profile.name });
+    await serialize(() => connect(profile.id));
+    sendSoulProgress({ phase: 'done', server: profile.name, ...metrics });
+    return { connectionState, profile, metrics };
+  } catch (err) {
+    // connect() manages its own failure state; every other path here has to
+    // put the UI back to idle itself.
+    if (connectionState === 'connecting') {
+      connectionState = 'disconnected';
+      sendState();
+    }
+    sendSoulProgress({ phase: 'error', message: err.code === 'ABORTED' ? null : (err.message || 'خطا') });
+    if (err.code === 'ABORTED') return { connectionState, cancelled: true };
+    throw err;
+  } finally {
+    if (soulSelection === controller) soulSelection = null;
+  }
+}
+
+ipcMain.handle('soul:connectBest', () => connectBestSoul());
 
 ipcMain.handle('connection:status', () => ({
   connectionState,

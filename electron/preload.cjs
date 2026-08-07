@@ -99,4 +99,14 @@ contextBridge.exposeInMainWorld('soul', {
     ipcRenderer.on('updater-status', handler);
     return () => ipcRenderer.removeListener('updater-status', handler);
   },
+
+  soulList: (force) => ipcRenderer.invoke('soul:list', { force: !!force }),
+  soulSetEnabled: (enabled) => ipcRenderer.invoke('soul:setEnabled', enabled),
+  soulConnectBest: () => ipcRenderer.invoke('soul:connectBest'),
+  soulCancel: () => ipcRenderer.invoke('soul:cancel'),
+  onSoulProgress: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('soul-progress', handler);
+    return () => ipcRenderer.removeListener('soul-progress', handler);
+  },
 });

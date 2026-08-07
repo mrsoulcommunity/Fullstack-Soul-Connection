@@ -519,6 +519,133 @@ button:disabled { cursor: default; }
 .group-action:disabled { opacity: 0.5; }
 .group-action.danger:hover { color: var(--danger); background: rgba(239, 90, 111, 0.1); }
 
+/* Soul Connection pool row -- pinned above the server list. Reads as a peer
+   of .server-card (same radius, same teal active treatment) because it sits in
+   the same choice, but carries a filled badge instead of a protocol tag: it
+   stands for a set of servers, not one host. */
+.soul-entry {
+  position: relative;
+  flex-shrink: 0;
+  margin: 0 14px 8px;
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+  overflow: hidden;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.soul-entry:hover { border-color: #2b3247; }
+
+.soul-entry.active {
+  border-color: rgba(53, 224, 192, 0.3);
+  background: linear-gradient(180deg, rgba(53, 224, 192, 0.1), rgba(53, 224, 192, 0.03));
+}
+
+.soul-entry.failed { border-color: rgba(239, 90, 111, 0.35); }
+
+.soul-entry-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  background: none;
+  border: none;
+  text-align: right;
+  cursor: pointer;
+}
+
+.soul-entry-main:disabled { cursor: default; opacity: 0.7; }
+
+.soul-entry-badge {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-faint);
+  transition: background 0.15s, color 0.15s;
+}
+
+.soul-entry.active .soul-entry-badge { background: var(--signal-tint); color: var(--signal); }
+.soul-entry.working .soul-entry-badge svg { animation: spin 1.6s linear infinite; }
+.soul-entry.failed .soul-entry-badge { background: rgba(239, 90, 111, 0.14); color: var(--danger); }
+
+.soul-entry-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.soul-entry-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.soul-entry.active .soul-entry-title { color: var(--signal); }
+
+.soul-entry-sub {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.soul-entry.failed .soul-entry-sub { color: var(--danger); }
+
+/* Steady dot, not a pulse -- "connected" is a state, and an animation here
+   would read as "still working on it". */
+.soul-entry-live {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--signal);
+  box-shadow: 0 0 8px var(--signal);
+}
+
+.soul-entry-refresh {
+  flex: none;
+  width: 30px;
+  border: none;
+  border-inline-start: 1px solid var(--hairline);
+  background: none;
+  color: var(--text-faint);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.soul-entry-refresh:hover:not(:disabled) { color: var(--text); background: rgba(255, 255, 255, 0.04); }
+.soul-entry-refresh:disabled { opacity: 0.4; cursor: default; }
+
+.soul-entry-progress {
+  position: absolute;
+  bottom: 0;
+  inset-inline: 0;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.soul-entry-progress-fill {
+  height: 100%;
+  background: var(--signal);
+  transition: width 0.2s ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .soul-entry.working .soul-entry-badge svg { animation: none; }
+}
+
 .server-card {
   position: relative;
   border: 1px solid transparent;
