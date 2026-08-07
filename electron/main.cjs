@@ -637,9 +637,17 @@ app.whenReady().then(async () => {
   createWindow();
   createTray();
 
-  initUpdater(mainWindow);
+  initUpdater(mainWindow, {
+    onAvailable: (version) => notify(
+      'نسخه‌ی جدید موجود است',
+      `Soul Connection ${version} منتشر شد. برای دانلود و نصب، برنامه را باز کنید.`
+    ),
+  });
   if (app.isPackaged) {
+    // One check shortly after launch, then every 6 hours, so a release that
+    // lands while the app is sitting in the tray still reaches the user.
     setTimeout(() => checkForUpdates().catch(() => {}), 5000);
+    setInterval(() => checkForUpdates().catch(() => {}), 6 * 60 * 60 * 1000);
   }
 
   const settings = getSettings();

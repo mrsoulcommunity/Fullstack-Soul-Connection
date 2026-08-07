@@ -688,6 +688,52 @@ button:disabled { cursor: default; }
   color: var(--text-faint);
 }
 
+/* Update banner -- sits between the main header and the active tab. Uses the
+   warm "attention" hue while an update is merely available, and switches to
+   the signal teal once it's downloaded and one click from being installed. */
+.update-banner {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 20px 0;
+  padding: 11px 14px;
+  border: 1px solid rgba(240, 182, 74, 0.35);
+  border-radius: var(--radius-md);
+  background: rgba(240, 182, 74, 0.08);
+  color: var(--warn);
+}
+
+.update-banner.ready {
+  border-color: rgba(53, 224, 192, 0.35);
+  background: var(--signal-tint);
+  color: var(--signal);
+}
+
+.update-banner-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.update-banner-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.update-banner-hint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.update-banner .btn {
+  flex: none;
+  padding: 8px 16px;
+}
+
 .icon-btn.ghost {
   background: none;
   border-color: transparent;

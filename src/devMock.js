@@ -88,6 +88,7 @@ export function installDevMock() {
   let sessionTotal = 0;
 
   const emitState = () => listeners.state.forEach((fn) => fn({ ...state, systemProxyEnabled }));
+  const emitUpdater = (payload) => listeners.updater.forEach((fn) => fn(payload));
   const on = (key) => (fn) => {
     listeners[key].push(fn);
     return () => listeners[key].splice(listeners[key].indexOf(fn), 1);
@@ -224,8 +225,24 @@ export function installDevMock() {
     copyImage: async () => true,
     resetUsage: async () => profiles,
     resetAllUsage: async () => profiles,
-    checkForUpdates: () => {},
-    downloadUpdate: () => {},
+    // Walks the same status sequence electron-updater emits against GitHub, so
+    // the update banner and the About section can be exercised in the browser.
+    checkForUpdates: () => {
+      emitUpdater({ status: 'checking' });
+      setTimeout(() => emitUpdater({ status: 'available', version: '2.1.0' }), 700);
+    },
+    downloadUpdate: () => {
+      let percent = 0;
+      const timer = setInterval(() => {
+        percent += 12;
+        if (percent >= 100) {
+          clearInterval(timer);
+          emitUpdater({ status: 'downloaded', version: '2.1.0' });
+        } else {
+          emitUpdater({ status: 'downloading', percent });
+        }
+      }, 250);
+    },
     installUpdate: () => {},
     openLogsFolder: () => {},
     openProxyFolder: () => {},

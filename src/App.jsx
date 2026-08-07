@@ -10,6 +10,42 @@ import { loadSession, saveSession, clearSession } from './utils/sessionState.js'
 
 const PING_CONCURRENCY = 12;
 
+// Update banner. The About section in Settings also exposes the same actions,
+// but a released update has to reach someone who never opens Settings -- so it
+// surfaces here, above whichever tab is showing, until acted on or dismissed.
+function UpdateBanner({ status, version, percent, onDownload, onInstall, onDismiss }) {
+  const downloading = status === 'downloading';
+  const ready = status === 'downloaded';
+
+  return (
+    <div className={`update-banner ${ready ? 'ready' : ''}`}>
+      <Icon name={ready ? 'refresh' : 'arrowDown'} size={15} />
+      <div className="update-banner-text">
+        <span className="update-banner-title">
+          {ready ? `نسخه‌ی ${version} آماده‌ی نصب است` : `نسخه‌ی جدید ${version} موجود است`}
+        </span>
+        <span className="update-banner-hint">
+          {downloading
+            ? `در حال دانلود… ${Math.round(percent || 0)}٪`
+            : ready
+              ? 'برنامه بسته و دوباره باز می‌شود. سرورها و تنظیمات شما دست‌نخورده می‌مانند.'
+              : 'دانلود از مخزن گیت‌هاب Soul Connection'}
+        </span>
+      </div>
+      {ready ? (
+        <button className="btn primary" onClick={onInstall}>نصب و راه‌اندازی مجدد</button>
+      ) : (
+        <button className="btn primary" onClick={onDownload} disabled={downloading}>
+          {downloading ? 'در حال دانلود…' : 'دانلود'}
+        </button>
+      )}
+      <button className="icon-btn ghost" onClick={onDismiss} title="بعداً">
+        <Icon name="close" size={14} />
+      </button>
+    </div>
+  );
+}
+
 // Custom chrome for the frameless window. Standard Windows layout: app
 // icon/name at the top-left, minimize/maximize/close at the top-right in
 // that order (close outermost) -- `.titlebar` forces `direction: ltr` in CSS
@@ -62,6 +98,10 @@ export default function App() {
   const [settings, setSettings] = useState(null);
   const [appInfo, setAppInfo] = useState(null);
   const [updaterStatus, setUpdaterStatus] = useState(null);
+  // Version carried across the whole download flow: only 'available' and
+  // 'downloaded' events carry it, 'downloading' progress events don't.
+  const [pendingUpdate, setPendingUpdate] = useState(null);
+  const [updateDismissed, setUpdateDismissed] = useState(false);
   const [pings, setPings] = useState({});
   const [showAdd, setShowAdd] = useState(false);
   // Seeded eagerly (before `settings` loads) from whatever was last saved --
@@ -173,7 +213,15 @@ export default function App() {
     const offTraffic = window.soul.onTrafficUpdate((data) => setTraffic(data));
     const offProfiles = window.soul.onProfilesChanged(() => refresh());
     const offOpenSettings = window.soul.onOpenSettings(() => setTab('settings'));
-    const offUpdater = window.soul.onUpdaterStatus(setUpdaterStatus);
+    const offUpdater = window.soul.onUpdaterStatus((s) => {
+      setUpdaterStatus(s);
+      if (s.status === 'available' || s.status === 'downloaded') {
+        setPendingUpdate(s.version);
+        // A check that turns up a release re-opens the banner even if an
+        // earlier one was dismissed -- the user asked for this answer.
+        setUpdateDismissed(false);
+      }
+    });
     return () => { offState(); offLatency(); offTraffic(); offProfiles(); offOpenSettings(); offUpdater(); };
   }, [refresh]);
 
@@ -570,6 +618,17 @@ export default function App() {
               <Icon name={tab === 'settings' ? 'close' : 'settings'} size={16} />
             </button>
           </header>
+
+          {pendingUpdate && !updateDismissed && (
+            <UpdateBanner
+              status={updaterStatus?.status}
+              version={pendingUpdate}
+              percent={updaterStatus?.percent}
+              onDownload={() => window.soul.downloadUpdate()}
+              onInstall={() => window.soul.installUpdate()}
+              onDismiss={() => setUpdateDismissed(true)}
+            />
+          )}
 
           {tab === 'servers' ? (
             <ConnectHero

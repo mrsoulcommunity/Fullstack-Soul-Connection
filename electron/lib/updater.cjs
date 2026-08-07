@@ -12,11 +12,19 @@ function send(status, extra) {
   }
 }
 
-function initUpdater(mainWindow) {
+// `onAvailable` lets main.cjs raise an OS notification the moment a newer
+// release shows up on GitHub -- the in-app banner only helps if the window is
+// open and in front, and the app spends most of its life minimized to tray.
+function initUpdater(mainWindow, { onAvailable } = {}) {
   win = mainWindow;
 
   autoUpdater.on('checking-for-update', () => send('checking'));
-  autoUpdater.on('update-available', (info) => send('available', { version: info.version }));
+  autoUpdater.on('update-available', (info) => {
+    send('available', { version: info.version, releaseNotes: info.releaseNotes || '' });
+    if (onAvailable) {
+      try { onAvailable(info.version); } catch { /* never let a notification break the updater */ }
+    }
+  });
   autoUpdater.on('update-not-available', () => send('not-available'));
   autoUpdater.on('error', (err) => send('error', { message: err?.message || String(err) }));
   autoUpdater.on('download-progress', (progress) => send('downloading', { percent: progress.percent }));

@@ -1,7 +1,7 @@
 {
   "name": "soul-connection",
   "productName": "Soul Connection",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "A modern V2Ray/Xray client for Windows",
   "main": "electron/main.cjs",
   "author": "Soul",
@@ -70,7 +70,9 @@
     },
     "nsis": {
       "oneClick": false,
+      "perMachine": false,
       "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false,
       "artifactName": "setup.${ext}",
       "warningsAsErrors": false,
       "installerIcon": "electron/assets/icon.ico",
