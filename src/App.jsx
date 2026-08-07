@@ -136,7 +136,10 @@ export default function App() {
       if (!text) return;
 
       try {
-        if (/^(vmess|vless|trojan|ss):\/\//i.test(text)) {
+        // Look for a config prefix ANYWHERE in the paste, not just at the
+        // very start -- a multi-config paste can have a leading blank line,
+        // a label, or other text before the first real link.
+        if (/(vmess|vless|trojan|ss):\/\//i.test(text)) {
           await handleAddLink(text);
         } else if (/^https?:\/\//i.test(text)) {
           await handleAddSubscription(text);
@@ -197,10 +200,19 @@ export default function App() {
   // (ServerCard via ServerList, ConnectHero, StatusBar) that sit in the
   // hottest paths (ping-all, 1s traffic ticks) -- a fresh function reference
   // every App render would defeat memoization and re-render the whole tree.
+  // The dismiss timer is tracked so a second toast restarts the countdown --
+  // otherwise the previous toast's timer fires mid-life and clears the new one
+  // early (very visible in flows that toast twice in a row, like add + connect).
+  const toastTimer = useRef(null);
   const showToast = useCallback((msg, type = 'info') => {
     setToast({ msg, type });
-    setTimeout(() => setToast(null), 2600);
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => {
+      toastTimer.current = null;
+      setToast(null);
+    }, 2600);
   }, []);
+  useEffect(() => () => { if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
 
   const handleToggleConnect = useCallback(async () => {
     if (busy) return;
@@ -306,10 +318,11 @@ export default function App() {
   }, [showToast]);
 
   const handleAddLink = useCallback(async (link) => {
-    await window.soul.addLink(link);
+    const { profiles: added, duplicates } = await window.soul.addLink(link);
     await refresh();
     setShowAdd(false);
-    showToast('کانفیگ اضافه شد');
+    const dupNote = duplicates > 0 ? ` (${duplicates} مورد تکراری نادیده گرفته شد)` : '';
+    showToast(added.length > 1 ? `${added.length} کانفیگ اضافه شد${dupNote}` : `کانفیگ اضافه شد${dupNote}`);
   }, [refresh, showToast]);
 
   const handleAddSubscription = useCallback(async (url) => {

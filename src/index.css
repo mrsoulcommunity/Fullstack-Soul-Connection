@@ -1,7 +1,14 @@
+/* Bundled (not local()) on purpose: Windows per-user fonts live under HKCU
+   and are invisible to elevated (Run as administrator) processes, so a
+   local('Vazirmatn') lookup silently falls back to Segoe UI with different
+   metrics there -- text painted larger than its layout boxes, overlapping
+   rows. Shipping the font inside the app makes rendering identical
+   everywhere. Variable font: one file covers every weight 100-900. */
 @font-face {
   font-family: 'Vazirmatn';
-  src: local('Vazirmatn'), local('Vazirmatn-Regular');
-  font-weight: 400;
+  src: url('./assets/fonts/Vazirmatn-var.woff2') format('woff2-variations');
+  font-weight: 100 900;
+  font-display: swap;
 }
 
 :root {

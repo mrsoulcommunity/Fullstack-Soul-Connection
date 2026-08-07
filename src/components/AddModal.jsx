@@ -31,18 +31,18 @@ export default function AddModal({ onClose, onAddLink, onAddSubscription, onAddC
         <p className="hint">
           {tab === 'custom'
             ? 'تمام تنظیمات کانفیگ را به‌صورت دستی وارد کن.'
-            : 'لینک vmess://, vless://, trojan:// یا ss:// یا یک آدرس ساب‌اسکریپشن وارد کن.'}
+            : 'یک یا چند لینک vmess://, vless://, trojan:// یا ss:// (پشت‌سرهم یا در چند خط) یا یک آدرس ساب‌اسکریپشن وارد کن.'}
         </p>
 
         <div className="tabs">
           <button className={`tab ${tab === 'link' ? 'active' : ''}`} onClick={() => setTab('link')}>
-            لینک تکی
+            لینک
           </button>
           <button className={`tab ${tab === 'sub' ? 'active' : ''}`} onClick={() => setTab('sub')}>
             ساب‌اسکریپشن
           </button>
           <button className={`tab ${tab === 'custom' ? 'active' : ''}`} onClick={() => setTab('custom')}>
-            Custom
+            دستی
           </button>
         </div>
 

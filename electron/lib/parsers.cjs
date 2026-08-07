@@ -186,8 +186,69 @@ function parseLink(link) {
   return null;
 }
 
-// Parse a block of text: multiple share links, or a base64-encoded
-// subscription payload containing one link per line.
+// Boundary-aware multi-config scanner. A config's URL runs until whichever
+// comes first: another recognized protocol prefix starting right there (so
+// configs pasted back-to-back with zero separator still split correctly --
+// e.g. "...#Avmess://..."), whitespace, or end of string. No word-boundary
+// guard on the prefix itself: a config's fragment/remark can end in any
+// character, including a letter, right before the next protocol starts, so
+// requiring a non-alphanumeric lookbehind would break exactly the
+// no-separator case this is meant to handle. A stray "ss://" matched inside
+// unrelated prose (e.g. "express://") is harmless -- it just fails to parse
+// as a valid config below and gets silently dropped like any other garbage.
+const CONFIG_PROTOCOLS = 'vmess|vless|trojan|ss';
+const CONFIG_PREFIX = `(?:${CONFIG_PROTOCOLS}):\\/\\/`;
+const CONFIG_SCAN_RE = new RegExp(`${CONFIG_PREFIX}[^\\s]*?(?=${CONFIG_PREFIX}|\\s|$)`, 'gi');
+
+// Trims trailing punctuation a paste source (chat apps, numbered lists,
+// sentences describing the config) commonly tacks onto the end of a link
+// that isn't actually part of the URL.
+//
+// Closing brackets get a balance check rather than being stripped outright:
+// bracketed remarks like "#[Reality-Tunnel-Google-01]" are extremely common
+// in real subscriptions (this project's own feed uses them for every entry),
+// and blindly trimming the tail would rename every one of those servers.
+// Only a closer with no matching opener inside the link is paste noise.
+const CLOSERS = { ')': '(', ']': '[', '}': '{' };
+const PLAIN_JUNK = new Set([',', ';', '.', '!', '?', '"', "'", '>']);
+
+function countChar(s, ch) {
+  let n = 0;
+  for (const c of s) if (c === ch) n += 1;
+  return n;
+}
+
+function stripTrailingJunk(link) {
+  let out = link;
+  // One character at a time, so ".)" and "])" style tails resolve correctly
+  // and each closer is re-balanced against what actually remains.
+  for (;;) {
+    const last = out.slice(-1);
+    if (PLAIN_JUNK.has(last)) {
+      out = out.slice(0, -1);
+      continue;
+    }
+    const opener = CLOSERS[last];
+    if (opener && countChar(out, last) > countChar(out, opener)) {
+      out = out.slice(0, -1);
+      continue;
+    }
+    return out;
+  }
+}
+
+// Extracts every individual share-link found anywhere in a block of text,
+// regardless of how they're separated (newlines, spaces, nothing at all) or
+// what other text surrounds them.
+function extractConfigLinks(text) {
+  const raw = String(text || '');
+  const matches = raw.match(CONFIG_SCAN_RE) || [];
+  return matches.map(stripTrailingJunk).filter(Boolean);
+}
+
+// Parse a block of text: one or many share links in any arrangement --
+// separated by newlines/spaces, concatenated with no separator, interspersed
+// with unrelated text -- or a base64-encoded subscription payload.
 function parseMany(text) {
   text = String(text || '').trim();
   if (!text) return [];
@@ -198,9 +259,13 @@ function parseMany(text) {
     } catch { /* keep original */ }
   }
   const out = [];
-  for (const line of text.split(/[\r\n]+/)) {
-    const p = parseLink(line);
-    if (p) out.push(p);
+  const seen = new Set();
+  for (const link of extractConfigLinks(text)) {
+    if (seen.has(link)) continue; // same link appearing more than once in this paste
+    const p = parseLink(link);
+    if (!p) continue;
+    seen.add(link);
+    out.push(p);
   }
   return out;
 }

@@ -16,17 +16,28 @@ const portable = process.argv.includes('--portable');
 const winTarget = portable ? 'portable' : 'nsis';
 const staleBuildDirPrefix = '.builder-';
 
+// The NSIS installer ships as ONE setup.exe carrying both the x64 and the ia32
+// app payload, so a single download installs correctly on 32-bit and 64-bit
+// Windows alike. The portable build stays single-arch (x64): a portable exe has
+// no installer step that could pick a payload, and doubling its size to embed
+// an arch that never gets used would be pure waste.
+const INSTALLER_ARCHS = ['x64', 'ia32'];
+const PORTABLE_ARCH = 'x64';
+
 function run(cmd) {
   console.log(`\n> ${cmd}`);
   execSync(cmd, { stdio: 'inherit', cwd: root });
 }
 
-function copyRecursive(src, dest) {
+// `accept(entryName)` lets a caller skip specific directory entries (used to
+// keep the per-arch bin/win-* folders out of a copy of the shared payload).
+function copyRecursive(src, dest, accept = () => true) {
   const stat = fs.statSync(src);
   if (stat.isDirectory()) {
     fs.mkdirSync(dest, { recursive: true });
     for (const entry of fs.readdirSync(src)) {
-      copyRecursive(path.join(src, entry), path.join(dest, entry));
+      if (!accept(entry)) continue;
+      copyRecursive(path.join(src, entry), path.join(dest, entry), accept);
     }
   } else {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -96,6 +107,61 @@ const buildStartedAt = Date.now();
 // 1. Build the UI bundle
 run('npx vite build');
 
+// ---------------------------------------------------------------------------
+// Installer path: one multi-arch NSIS installer.
+//
+// This can't reuse the --dir + --prepackaged flow below, because
+// --prepackaged takes exactly one unpacked app directory and a dual-arch
+// installer needs two. So electron-builder drives the whole pipeline here.
+// The AV interference that motivated the repair path is nondeterministic
+// (it drops files mid-copy), so a failed attempt is simply retried.
+//
+// Note: package.json sets nsis.warningsAsErrors=false. makensis emits
+// "warning 9000: Insecure filename" for any artifact literally named
+// setup.exe (Windows applies installer compatibility shims to it), and
+// electron-builder otherwise promotes that warning to a hard build failure.
+// The shims are exactly right for something that *is* an installer, and the
+// setup.exe filename is a deliberate product decision, so the warning is
+// downgraded rather than the name changed.
+// ---------------------------------------------------------------------------
+if (!portable) {
+  cleanupStaleOutputDirs();
+  for (const dir of ['win-unpacked', 'win-ia32-unpacked']) {
+    removeDirectoryIfExists(path.join(releaseDir, dir), `previous unpacked output "${dir}"`);
+  }
+
+  const archFlags = INSTALLER_ARCHS.map((a) => `--${a}`).join(' ');
+  const publishFlag = shouldPublish ? '--publish always' : '--publish never';
+  const cmd = `npx electron-builder --win nsis ${archFlags} ${publishFlag}`;
+
+  const MAX_ATTEMPTS = 3;
+  let built = false;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS && !built; attempt += 1) {
+    try {
+      run(cmd);
+      built = true;
+    } catch (e) {
+      if (attempt === MAX_ATTEMPTS) {
+        console.error('\n[error] The installer build failed after ' + MAX_ATTEMPTS + ' attempts.');
+        console.error('[error] Close any running Soul Connection windows and add this folder to your antivirus exclusions, then try again.');
+        process.exit(1);
+      }
+      console.log(`\n[info] Attempt ${attempt} failed (commonly antivirus touching files mid-copy). Retrying…`);
+      sleep(3000);
+    }
+  }
+
+  const installerPath = path.join(releaseDir, 'setup.exe');
+  if (!fs.existsSync(installerPath) || fs.statSync(installerPath).mtimeMs < buildStartedAt) {
+    console.error(`[error] ${installerPath} is missing or predates this build run. Aborting.`);
+    process.exit(1);
+  }
+
+  const sizeMb = (fs.statSync(installerPath).size / (1024 * 1024)).toFixed(1);
+  console.log(`\nBuild finished successfully.\nInstaller: ${installerPath} (${sizeMb} MB, x64 + ia32)`);
+  process.exit(0);
+}
+
 // 2. Build into a unique temporary output directory. Reusing
 //    release/win-unpacked makes portable builds fragile on Windows because a
 //    running app, Explorer preview, terminal cwd, or antivirus scan can lock
@@ -131,14 +197,20 @@ if (builderFailed) {
   }
 
   // Re-copy extraResources ("bin" -> resources/bin) since electron-builder
-  // aborted before it reached that step.
+  // aborted before it reached that step. `${arch}` resolves to the arch this
+  // portable build targets, and the per-arch source folders are excluded from
+  // the shared-payload copy so exactly one xray.exe/wintun.dll pair ships.
+  const binRoot = path.join(root, 'bin');
+  const archDirs = new Set(
+    fs.existsSync(binRoot) ? fs.readdirSync(binRoot).filter((e) => e.startsWith('win-')) : []
+  );
   const extraResources = (pkg.build && pkg.build.extraResources) || [];
   for (const res of extraResources) {
-    const src = path.join(root, res.from);
-    const dest = path.join(outDir, 'resources', res.to || res.from);
-    if (fs.existsSync(src)) {
-      copyRecursive(src, dest);
-    }
+    const from = String(res.from).replace(/\$\{arch\}/g, PORTABLE_ARCH);
+    const src = path.join(root, from);
+    if (!fs.existsSync(src)) continue;
+    const dest = path.join(outDir, 'resources', res.to || from);
+    copyRecursive(src, dest, (entry) => !archDirs.has(entry));
   }
 
   if (!fs.existsSync(path.join(outDir, exeName))) {

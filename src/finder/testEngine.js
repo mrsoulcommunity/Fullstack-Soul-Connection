@@ -118,14 +118,18 @@ function ensureEventBridge() {
     if (!profileId) return;
     const r = state.results[profileId];
     if (!r) return;
+    // Always go through upsert() rather than mutating `r` in place: the result
+    // objects are handed straight to React.memo'd cards, so a same-identity
+    // object means the card skips re-rendering and its live phase/samples
+    // silently freeze for the whole test even though the store did update.
     if (ev.type === 'phase') {
-      r.phase = ev.phase;
+      upsert(profileId, { phase: ev.phase });
       if (PHASE_LABELS[ev.phase]) log(`${nameOf(profileId)} — ${PHASE_LABELS[ev.phase]}…`, 'dim');
       if (ev.phase === 'download' || ev.phase === 'upload') {
         state.activeSpeed = { profileId, dir: ev.phase === 'upload' ? 'up' : 'down', bps: 0, samples: state.activeSpeed?.profileId === profileId ? state.activeSpeed.samples : [] };
       }
     } else if (ev.type === 'sample') {
-      r.liveSamples = [...(r.liveSamples || []), ev.ms];
+      upsert(profileId, { liveSamples: [...(r.liveSamples || []), ev.ms] });
       state.pulse = [...state.pulse, { t: Date.now(), ms: ev.ms, profileId }].slice(-120);
       emitThrottled();
       return;

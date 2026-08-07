@@ -1,7 +1,7 @@
 {
   "name": "soul-connection",
   "productName": "Soul Connection",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "A modern V2Ray/Xray client for Windows",
   "main": "electron/main.cjs",
   "author": "Soul",
@@ -41,17 +41,38 @@
     "extraResources": [
       {
         "from": "bin",
+        "to": "bin",
+        "filter": [
+          "**/*",
+          "!win-x64",
+          "!win-x64/**",
+          "!win-ia32",
+          "!win-ia32/**"
+        ]
+      },
+      {
+        "from": "bin/win-${arch}",
         "to": "bin"
       }
     ],
     "win": {
-      "target": "nsis",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "ia32"
+          ]
+        }
+      ],
       "requestedExecutionLevel": "asInvoker",
       "icon": "electron/assets/icon.ico"
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "artifactName": "setup.${ext}",
+      "warningsAsErrors": false,
       "installerIcon": "electron/assets/icon.ico",
       "uninstallerIcon": "electron/assets/icon.ico"
     },
@@ -62,7 +83,7 @@
       {
         "provider": "github",
         "owner": "mrsoulcommunity",
-        "repo": "Fullstack-Soul-Connection"
+        "repo": "SoulConnection"
       }
     ]
   }

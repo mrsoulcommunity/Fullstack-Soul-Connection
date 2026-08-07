@@ -401,8 +401,13 @@ function useMemoGroups(filtered, subscriptions, pings) {
   return useMemo(() => {
     const bySub = new Map();
     const noGroup = [];
+    // Groups are rendered by walking `subscriptions`, so a profile tagged with
+    // a subId that no longer exists (restored backup, data file from an older
+    // build) would land in a group that never renders -- invisible in the list
+    // while still counted everywhere else. Treat those as local configs.
+    const knownSubIds = new Set(subscriptions.map((s) => s.id));
     for (const p of filtered) {
-      if (p.subId) {
+      if (p.subId && knownSubIds.has(p.subId)) {
         if (!bySub.has(p.subId)) bySub.set(p.subId, []);
         bySub.get(p.subId).push(p);
       } else {

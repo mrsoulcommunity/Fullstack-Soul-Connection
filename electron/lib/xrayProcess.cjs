@@ -81,10 +81,16 @@ class XrayProcess extends EventEmitter {
       const proc = this.proc;
       const isAlive = () => proc.exitCode === null && !proc.killed;
       let settled = false;
-      const finish = () => { if (!settled) { settled = true; resolve(); } };
+      let killTimer = null;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (killTimer) clearTimeout(killTimer);
+        resolve();
+      };
       proc.once('exit', finish);
       proc.kill();
-      setTimeout(() => {
+      killTimer = setTimeout(() => {
         if (isAlive()) proc.kill('SIGKILL');
         finish();
       }, 3000);

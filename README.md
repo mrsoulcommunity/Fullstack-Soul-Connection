@@ -1,27 +1,51 @@
 # Soul Connection
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/mrsoulcommunity/Fullstack-Soul-Connection?label=version)](https://github.com/mrsoulcommunity/Fullstack-Soul-Connection/releases)
-[![Downloads](https://img.shields.io/github/downloads/mrsoulcommunity/Fullstack-Soul-Connection/total)](https://github.com/mrsoulcommunity/Fullstack-Soul-Connection/releases)
+[![Release](https://img.shields.io/github/v/release/mrsoulcommunity/SoulConnection?label=version)](https://github.com/mrsoulcommunity/SoulConnection/releases)
+[![Downloads](https://img.shields.io/github/downloads/mrsoulcommunity/SoulConnection/total)](https://github.com/mrsoulcommunity/SoulConnection/releases)
 
-> **A powerful, secure, and user-friendly cross-platform proxy client built with React, Electron, and gRPC.**
+> **A modern V2Ray / Xray client for Windows — Persian UI, built with React and Electron.**
 
-Soul Connection is a modern desktop application designed to manage and connect to various proxy protocols seamlessly. Built on top of the robust Sing-box core, it provides an intuitive interface for managing VLESS, Trojan, and Shadowsocks connections with advanced features like real-time latency testing, subscription management, and system proxy configuration.
+Soul Connection is a desktop client for managing and connecting to VMess, VLESS, Trojan and
+Shadowsocks servers. It wraps the Xray core behind a clean, fully Persian interface, and adds
+subscription management, a smart server finder with real latency and speed testing, live traffic
+stats, a firewall-backed kill switch, and full-tunnel (TUN) mode.
+
+---
+
+## 📥 Download
+
+Grab the latest `setup.exe` from the [Releases page](https://github.com/mrsoulcommunity/SoulConnection/releases/latest).
+
+A single installer covers **both 32-bit (ia32) and 64-bit (x64) Windows** — it detects your
+system and installs the matching build. Windows 10 or later is recommended.
+
+Because the installer is not code-signed, SmartScreen may warn on first run. Choose
+**More info → Run anyway**. Some antivirus products also flag the bundled `xray.exe`; if the app
+reports that `xray.exe` is missing, add the install folder to your antivirus exclusions and
+reinstall.
 
 ---
 
 ## ✨ Features
 
-- 🚀 **Multi-Protocol Support**: Full support for VLESS (Reality), Trojan, and Shadowsocks protocols.
-- 🛡️ **Secure & Private**: Built-in encryption and privacy-focused design with no data logging.
-- ⚡ **High Performance**: Optimized routing engine powered by Sing-box for minimal latency.
-- 🌐 **Cross-Platform**: Runs smoothly on Windows, macOS, and Linux.
-- 🎨 **Modern UI**: Clean, responsive interface built with React and Tailwind CSS.
-- 🔄 **Subscription Management**: Import and auto-update configurations via remote links.
-- 📊 **Real-time Latency Test**: One-click speed test for all servers with visual indicators.
-- 🔍 **Smart Routing**: Automatic rule-based routing for domestic and international traffic.
-- 💻 **System Proxy Integration**: Easily toggle system-wide proxy or use PAC mode.
-- 📦 **Portable Mode**: Available as a portable executable for USB drives or restricted environments.
+- **Protocols** — VMess, VLESS (incl. Reality / XTLS Vision), Trojan, and Shadowsocks.
+- **Transports** — TCP, WebSocket, gRPC, HTTP/2, mKCP, with TLS and Reality.
+- **Two connection modes** — System Proxy (default) or full-device Tunnel (TUN, needs admin).
+- **Subscriptions** — import by URL, refresh manually or on a timer, with remaining-quota display.
+- **Bulk paste** — paste one link or a whole wall of them at once; every valid config is
+  extracted and deduplicated automatically.
+- **Server Finder** — test ping, real latency through the tunnel, and download/upload speed, then
+  sort servers by a combined score.
+- **Kill Switch** — Windows Firewall rules that block all outbound traffic the moment the tunnel
+  drops, so nothing leaks outside it.
+- **Live stats** — real-time upload/download speed and per-server lifetime usage, via Xray's gRPC
+  stats API.
+- **Auto-reconnect** — detects an unexpected tunnel drop and retries with backoff.
+- **Auto-update** — checks GitHub Releases and installs new versions in place.
+- **Tray integration** — quick connect/disconnect and server switching without opening the window.
+- **Backup & restore** — export and import all profiles, subscriptions, and settings as JSON.
+- **QR sharing** — render any config as a QR code to copy or save.
 
 ---
 
@@ -29,189 +53,145 @@ Soul Connection is a modern desktop application designed to manage and connect t
 
 | Layer | Technology |
 |-------|------------|
-| **Frontend** | React 18, TypeScript, Tailwind CSS, Radix UI |
-| **Desktop Shell** | Electron 28+ |
-| **Build Tool** | Vite |
-| **Core Engine** | Sing-box (via gRPC) |
-| **State Management** | Zustand / Context API |
-| **Communication** | gRPC (Protobuf) |
-| **Packaging** | electron-builder |
+| **UI** | React 18 (plain JSX), hand-written CSS, Vazirmatn variable font |
+| **Desktop shell** | Electron 33 |
+| **Build tool** | Vite 5 |
+| **Core engine** | Xray-core (bundled `xray.exe`, per architecture) |
+| **Stats** | gRPC (`@grpc/grpc-js`) against Xray's StatsService |
+| **Tunnel driver** | Wintun (`wintun.dll`) for TUN mode |
+| **Packaging** | electron-builder (NSIS) |
+
+The renderer talks to the main process only through a `contextBridge` preload
+(`electron/preload.cjs`); `nodeIntegration` is off and the renderer is sandboxed.
 
 ---
 
-## 📦 Installation
+## 🚀 Building from source
 
 ### Prerequisites
 
-Ensure you have the following installed:
-- [Node.js](https://nodejs.org/) (v18 or higher)
-- [npm](https://www.npmjs.com/) or [yarn](https://yarnpkg.com/)
+- [Node.js](https://nodejs.org/) 18 or newer
 - Git
+- Windows (the app and its build targets are Windows-only)
 
-### Clone the Repository
-
-```bash
-git clone https://github.com/mrsoulcommunity/Fullstack-Soul-Connection.git
-cd Fullstack-Soul-Connection
-```
-
-### Install Dependencies
+### Setup
 
 ```bash
+git clone https://github.com/mrsoulcommunity/SoulConnection.git
+cd SoulConnection
 npm install
-# or
-yarn install
 ```
 
----
-
-## 🚀 Usage
-
-### Development Mode
-
-Run the app in development mode with hot-reloading:
-
-```bash
-npm run dev
-```
-
-### Build Executables
-
-#### Standard Build
-Creates installers for your current platform:
-```bash
-npm run build
-```
-
-#### Portable Build
-Creates a standalone executable (Windows):
-```bash
-npm run build:portable
-```
-
-#### Publish Release
-Builds and prepares artifacts for GitHub release:
-```bash
-npm run publish
-```
-
-### Running the App
-
-1. Launch the application via the generated executable or `npm run dev`.
-2. **Add a Server**:
-   - Click **"Import from Clipboard"** to paste a share link (`vless://`, `trojan://`, `ss://`).
-   - Or manually enter configuration details.
-3. **Connect**: Select a server from the list and click **"Connect"**.
-4. **Test Latency**: Click the **⚡** icon next to any server to check its speed.
-5. **System Proxy**: Enable "System Proxy" in settings to route all traffic through the tunnel.
-
----
-
-## 📂 Project Structure
+The `bin/` folder is not tracked in git. Before building, populate it with the Xray core and
+Wintun driver:
 
 ```text
-Fullstack-Soul-Connection/
-├── src/
-│   ├── main/             # Electron Main Process (gRPC, Window Mgmt)
-│   ├── renderer/         # React Frontend (UI Components)
-│   ├── core/             # Sing-box integration logic
-│   └── utils/            # Helper functions
-├── public/               # Static assets
-├── proto/                # Protobuf definitions for gRPC
-├── releases/             # Build output directory
-├── package.json          # Project metadata & scripts
-├── vite.config.ts        # Vite configuration
-└── electron-builder.yml  # Packaging configuration
+bin/
+├── geoip.dat
+├── geosite.dat
+├── win-x64/
+│   ├── xray.exe        # 64-bit Xray core
+│   └── wintun.dll      # 64-bit Wintun driver
+└── win-ia32/
+    ├── xray.exe        # 32-bit Xray core
+    └── wintun.dll      # 32-bit Wintun driver
 ```
 
----
-
-## ⚙️ Configuration
-
-The app stores user preferences and server lists in a local JSON file:
-- **Windows**: `%APPDATA%\soul-connection\config.json`
-- **macOS**: `~/Library/Application Support/soul-connection/config.json`
-- **Linux**: `~/.config/soul-connection/config.json`
-
-Supported configuration options:
-- `autoConnect`: Automatically connect to the last used server on startup.
-- `startupLaunch`: Run app on system boot.
-- `theme`: Light/Dark/System theme preference.
-- `routingMode`: Global, Rule-based, or Direct.
-
----
-
-## 📜 Available Scripts
+### Scripts
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start development server with hot reload |
-| `npm run build` | Build production app for current OS |
-| `npm run build:win` | Build for Windows |
-| `npm run build:mac` | Build for macOS |
-| `npm run build:linux` | Build for Linux |
-| `npm run build:portable` | Create portable executable |
-| `npm run publish` | Build and prepare for GitHub release |
-| `npm run lint` | Run ESLint checks |
-| `npm run type-check` | Verify TypeScript types |
+| `npm run dev` | Build the UI bundle and launch Electron |
+| `npm run start` | Same as `dev` |
+| `npm run build:ui` | Build only the Vite renderer bundle into `dist/` |
+| `npm run dist` | Build `release/setup.exe` (x64 + ia32 in one installer) |
+| `npm run dist:publish` | Same as `dist`, then publish to GitHub Releases (needs `GH_TOKEN`) |
+| `npm run dist:portable` | Build a single-file portable x64 executable |
 
 ---
 
-## 🌐 Supported Protocols
+## 📂 Project structure
 
-| Protocol | Features | Status |
-|----------|----------|--------|
-| **VLESS** | Reality, Vision, XTLS | ✅ Fully Supported |
-| **Trojan** | TLS, WebSocket | ✅ Fully Supported |
-| **Shadowsocks** | AEAD Ciphers (AES-128-GCM, Chacha20) | ✅ Fully Supported |
+```text
+SoulConnection/
+├── electron/
+│   ├── main.cjs           # Main process: IPC, tray, connection lifecycle
+│   ├── preload.cjs        # contextBridge API exposed to the renderer
+│   ├── assets/            # App icon
+│   └── lib/               # Xray process, config builder, parsers, kill switch, …
+├── src/
+│   ├── App.jsx            # Root component
+│   ├── components/        # UI: server list, settings, finder, modals
+│   ├── finder/            # Server-test orchestration store
+│   ├── utils/             # Formatting, geo lookup, scoring
+│   └── assets/fonts/      # Bundled Vazirmatn variable font
+├── bin/                   # Xray core + Wintun (not tracked; see above)
+├── scripts/build-exe.cjs  # Packaging pipeline
+├── vite.config.js
+└── package.json           # Also holds the electron-builder config
+```
+
+---
+
+## ⚙️ Where your data lives
+
+Profiles, subscriptions, and settings are stored as a single JSON file:
+
+- **Installed build** — `%APPDATA%\soul-connection\profiles.json`
+- **Portable build** — `data\profiles.json`, next to the executable
+
+The portable build leaves nothing behind on the host machine: delete its folder and it's gone.
+
+---
+
+## 🌐 Supported protocols
+
+| Protocol | Notable features | Status |
+|----------|------------------|--------|
+| **VLESS** | Reality, XTLS Vision, all transports | ✅ Supported |
+| **VMess** | AEAD, alterId 0 | ✅ Supported |
+| **Trojan** | TLS, WebSocket, gRPC | ✅ Supported |
+| **Shadowsocks** | AEAD ciphers, incl. 2022-blake3 | ✅ Supported |
 
 ---
 
 ## 🤝 Contributing
 
-We welcome contributions! Please follow these steps:
-
 1. Fork the repository.
 2. Create a feature branch (`git checkout -b feature/amazing-feature`).
-3. Commit your changes (`git commit -m 'Add amazing feature'`).
-4. Push to the branch (`git push origin feature/amazing-feature`).
-5. Open a Pull Request.
-
-Please read our [Contributing Guidelines](CONTRIBUTING.md) for details on code style and testing.
+3. Commit your changes.
+4. Push the branch and open a Pull Request.
 
 ---
 
 ## 📄 License
 
-This project is licensed under the **MIT License** - see the [LICENSE](LICENSE) file for details.
+MIT — see [LICENSE](LICENSE).
 
----
-
-## 👥 Authors
-
-- **Soul Community** - *Initial work* - [mrsoulcommunity](https://github.com/mrsoulcommunity)
-
-See also the list of [contributors](https://github.com/mrsoulcommunity/Fullstack-Soul-Connection/contributors) who participated in this project.
+Bundled third-party components keep their own licenses: Xray-core (MPL-2.0) and Wintun, both
+covered by the notices shipped in `bin/`.
 
 ---
 
 ## ⚠️ Disclaimer
 
-This software is intended for educational purposes and legitimate privacy protection only. The developers are not responsible for any misuse of this software. Users must comply with local laws and regulations regarding internet usage and proxy services.
+This software is intended for legitimate privacy protection and educational use only. The
+developers are not responsible for any misuse. Users must comply with the laws and regulations
+that apply to them regarding internet usage and proxy services.
 
 ---
 
-## 📥 Download
+## 👥 Authors
 
-Get the latest version from our [Releases Page](https://github.com/mrsoulcommunity/Fullstack-Soul-Connection/releases).
+- **Soul Community** — [mrsoulcommunity](https://github.com/mrsoulcommunity)
 
 ---
 
 <div align="center">
   <p>Made with ❤️ by the Soul Team</p>
   <p>
-    <a href="https://github.com/mrsoulcommunity/Fullstack-Soul-Connection">GitHub</a> •
-    <a href="https://github.com/mrsoulcommunity/Fullstack-Soul-Connection/issues">Issues</a> •
-    <a href="https://github.com/mrsoulcommunity/Fullstack-Soul-Connection/discussions">Discussions</a>
+    <a href="https://github.com/mrsoulcommunity/SoulConnection">GitHub</a> •
+    <a href="https://github.com/mrsoulcommunity/SoulConnection/issues">Issues</a> •
+    <a href="https://github.com/mrsoulcommunity/SoulConnection/releases">Releases</a>
   </p>
 </div>

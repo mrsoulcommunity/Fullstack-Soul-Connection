@@ -3,6 +3,15 @@ const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notificatio
 const path = require('path');
 const fs = require('fs');
 
+// Windows/Electron quirk: when launched from a UAC elevation prompt (portable
+// build run as administrator, or the app's own relaunchElevated() for tunnel
+// mode), Chromium can start up with a stale/unscaled DPI reading from before
+// the secure-desktop transition finishes settling -- the window then renders
+// at the wrong scale, with every row's layout box sized for 100% while the
+// actual text/glyphs paint at the real (125%/150%/etc.) scale, so everything
+// overlaps. Must be set before app is ready.
+app.commandLine.appendSwitch('high-dpi-support', '1');
+
 const { parseLink, parseMany, newId, parseSubscriptionUserinfo, buildCustomProfile } = require('./lib/parsers.cjs');
 const { buildXrayConfig } = require('./lib/xrayConfig.cjs');
 const { XrayProcess } = require('./lib/xrayProcess.cjs');
@@ -240,7 +249,16 @@ function updateLatencyPolling() {
     if (latencyPollInFlight) return;
     latencyPollInFlight = true;
     try {
-      const ms = await proxyPing(ports.httpPort);
+      // Credentials matter here: if the user configured HTTP proxy auth, an
+      // unauthenticated probe is rejected by xray locally with a 407 and never
+      // leaves the machine -- which would report a ~1ms "tunnel latency".
+      const settings = getSettings();
+      const ms = await proxyPing({
+        host: dialHost(settings.httpHost),
+        port: ports.httpPort,
+        username: settings.httpUsername,
+        password: settings.httpPassword,
+      });
       if (mainWindow && !mainWindow.isDestroyed() && connectionState === 'connected' && currentPorts === ports) {
         mainWindow.webContents.send('latency-update', { ms });
       }
@@ -338,6 +356,19 @@ function createWindow() {
   mainWindow.setMenuBarVisibility(false);
   mainWindow.setAspectRatio(1); // the UI is designed as a 1:1 square, restored on unmaximize/leave-fullscreen below
 
+  // Belt-and-suspenders for the same elevated-launch DPI quirk noted above:
+  // nudging the size by a pixel and immediately back forces Chromium to
+  // actually re-run layout against the display's real (by-then-settled)
+  // scale factor, instead of whatever it cached at the moment of construction.
+  const nudgeResizeForDpiRefresh = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const [w, h] = mainWindow.getSize();
+    mainWindow.setSize(w + 1, h + 1);
+    setImmediate(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setSize(w, h);
+    });
+  };
+
   mainWindow.once('ready-to-show', () => {
     const settings = getSettings();
     if (settings.startMinimized) {
@@ -346,9 +377,11 @@ function createWindow() {
       if (!settings.minimizeToTray) {
         mainWindow.show();
         mainWindow.minimize();
+        nudgeResizeForDpiRefresh();
       }
     } else {
       mainWindow.show();
+      nudgeResizeForDpiRefresh();
     }
   });
 
@@ -399,6 +432,19 @@ function createTray() {
 
 function findProfile(id) {
   return store.get('profiles', []).find((p) => p.id === id);
+}
+
+// The address the app itself must dial to reach its own local proxy. The
+// SOCKS/HTTP listener host is user-configurable (Network settings even
+// advertises 0.0.0.0 as "reachable from the LAN"), but a wildcard bind is not
+// a connectable address -- and neither is it what Windows should be pointed at
+// as a system proxy. Everything that connects *to* our own listener (latency
+// polling, the connection test, the system-proxy registry value) goes through
+// here so a custom host actually works instead of silently probing loopback.
+const WILDCARD_HOSTS = new Set(['0.0.0.0', '::', '[::]', '*']);
+function dialHost(host) {
+  const h = String(host || '').trim();
+  return !h || WILDCARD_HOSTS.has(h) ? '127.0.0.1' : h;
 }
 
 async function connect(profileId) {
@@ -501,7 +547,12 @@ async function disconnect() {
   connectionState = 'disconnecting';
   sendState();
   await disableSystemProxySafetyNet();
-  expectedExit = true;
+  // Only claim an exit if there's actually a process left to exit. Setting this
+  // unconditionally leaks a stale `true` whenever we disconnect with no live
+  // process (e.g. tearing down a failed 'connecting' attempt), and the next
+  // genuine crash then gets swallowed as "expected" -- no auto-reconnect, and
+  // a UI still showing "connected" over a dead tunnel.
+  expectedExit = xray.isRunning;
   await xray.stop();
   connectionState = 'disconnected';
   persistSessionTraffic();
@@ -560,7 +611,8 @@ xray.on('exit', async () => {
     // port instead of leaving it pointed at the now-dead old one.
     if (store.get('systemProxyEnabled', false) && currentPorts) {
       try {
-        await systemProxy.enable('127.0.0.1', currentPorts.httpPort, systemProxy.buildBypass(getSettings().customBypass));
+        const s = getSettings();
+        await systemProxy.enable(dialHost(s.httpHost), currentPorts.httpPort, systemProxy.buildBypass(s.customBypass));
       } catch { /* ignore */ }
     }
   } catch { /* xray's own 'exit' event will fire again and retry, up to the cap */ }
@@ -686,13 +738,25 @@ ipcMain.handle('settings:setMode', async (_e, mode) => {
   return mode;
 });
 
-ipcMain.handle('profiles:addLink', (_e, link) => {
-  const profile = parseLink(link);
-  if (!profile) throw new Error('کانفیگ نامعتبر است یا پشتیبانی نمی‌شود');
+ipcMain.handle('profiles:addLink', (_e, text) => {
+  // Accepts a single link or a whole clipboard/textarea paste containing
+  // several -- parseMany scans for every valid config regardless of how
+  // they're separated (or not separated at all) and dedupes within the paste.
+  const parsed = parseMany(text);
+  if (!parsed.length) throw new Error('کانفیگ نامعتبر است یا پشتیبانی نمی‌شود');
+
   const profiles = store.get('profiles', []);
-  profiles.push(profile);
-  store.set('profiles', profiles);
-  return profile;
+  const existingLinks = new Set(profiles.map((p) => p.link).filter(Boolean));
+  const added = [];
+  for (const p of parsed) {
+    if (existingLinks.has(p.link)) continue; // already saved -- skip duplicate
+    existingLinks.add(p.link);
+    added.push(p);
+  }
+  if (!added.length) throw new Error('همه‌ی کانفیگ‌های شناسایی‌شده از قبل اضافه شده بودند');
+
+  store.set('profiles', profiles.concat(added));
+  return { profiles: added, duplicates: parsed.length - added.length };
 });
 
 ipcMain.handle('profiles:addCustom', (_e, fields) => {
@@ -765,25 +829,54 @@ async function refreshSubscription(subId) {
   if (!sub) throw new Error('ساب‌اسکریپشن پیدا نشد');
   const { text, headers } = await fetchText(sub.url);
   const parsed = parseMany(text);
-  parsed.forEach((p) => { p.subId = subId; });
+  // Never let a broken/blocked/rate-limited response wipe the whole group:
+  // replacing N working configs with zero is far worse than a failed refresh.
+  if (!parsed.length) throw new Error('هیچ کانفیگی در این ساب‌اسکریپشن پیدا نشد');
   const usage = parseSubscriptionUserinfo(headers['subscription-userinfo']);
 
+  const allProfiles = store.get('profiles', []);
+  const previousByLink = new Map();
+  for (const p of allProfiles) {
+    if (p.subId === subId && p.link) previousByLink.set(p.link, p);
+  }
+
+  // A refresh almost always re-lists the same servers, but parseMany mints a
+  // brand-new id for every entry it parses. Re-attaching the previous id (and
+  // the user-owned state hanging off it) is what makes a re-listed server
+  // still be *the same* profile: otherwise every refresh -- including the
+  // silent auto-update timer -- looks like "the server you're connected to was
+  // deleted", tearing down a perfectly healthy tunnel and resetting favorites
+  // and lifetime usage counters along with it.
+  const refreshed = parsed.map((fresh) => {
+    fresh.subId = subId;
+    const prev = previousByLink.get(fresh.link);
+    if (!prev) return fresh;
+    return {
+      ...fresh,
+      id: prev.id,
+      favorite: prev.favorite,
+      totalBytes: prev.totalBytes,
+      lastUsedAt: prev.lastUsedAt,
+      createdAt: prev.createdAt,
+    };
+  });
+
   const activeId = store.get('activeProfileId');
-  const remaining = store.get('profiles', []).filter((p) => p.subId !== subId);
-  const wasActiveInSub = activeId && !remaining.find((p) => p.id === activeId);
-  const merged = remaining.concat(parsed);
-  store.set('profiles', merged);
-  if (wasActiveInSub) {
+  const nextProfiles = allProfiles.filter((p) => p.subId !== subId).concat(refreshed);
+  // Only a server genuinely dropped from the feed should end the session.
+  const activeVanished = activeId && !nextProfiles.some((p) => p.id === activeId);
+  store.set('profiles', nextProfiles);
+  if (activeVanished) {
     store.set('activeProfileId', null);
     if (connectionState !== 'disconnected') await serialize(disconnect);
   }
 
   sub.lastUpdated = Date.now();
-  sub.configCount = parsed.length;
+  sub.configCount = refreshed.length;
   if (usage) sub.usage = usage;
   store.set('subscriptions', subs);
 
-  return { subscription: sub, profiles: parsed };
+  return { subscription: sub, profiles: refreshed };
 }
 
 async function refreshAllSubscriptions() {
@@ -1031,7 +1124,7 @@ ipcMain.handle('systemProxy:enable', async () => {
     throw new Error('اول باید پروکسی محلی را روشن کنی (به یک سرور وصل شو)');
   }
   const settings = getSettings();
-  await systemProxy.enable('127.0.0.1', currentPorts.httpPort, systemProxy.buildBypass(settings.customBypass));
+  await systemProxy.enable(dialHost(settings.httpHost), currentPorts.httpPort, systemProxy.buildBypass(settings.customBypass));
   store.set('systemProxyEnabled', true);
   sendState();
   return true;
@@ -1052,7 +1145,7 @@ ipcMain.handle('network:testConnection', async (_e, { protocol }) => {
   const isSocks = protocol === 'socks';
   return testLocalProxy({
     protocol,
-    host: '127.0.0.1',
+    host: dialHost(isSocks ? settings.socksHost : settings.httpHost),
     port: isSocks ? currentPorts.socksPort : currentPorts.httpPort,
     username: isSocks ? settings.socksUsername : settings.httpUsername,
     password: isSocks ? settings.socksPassword : settings.httpPassword,
