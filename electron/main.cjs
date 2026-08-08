@@ -2,7 +2,6 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell, Notification, dialog, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const net = require('net');
 
 // Windows/Electron quirk: when launched from a UAC elevation prompt (portable
 // build run as administrator, or the app's own relaunchElevated() for tunnel
@@ -16,10 +15,13 @@ app.commandLine.appendSwitch('high-dpi-support', '1');
 const { parseLink, parseMany, newId, parseSubscriptionUserinfo, buildCustomProfile } = require('./lib/parsers.cjs');
 const { buildXrayConfig } = require('./lib/xrayConfig.cjs');
 const { XrayProcess } = require('./lib/xrayProcess.cjs');
-const systemProxy = require('./lib/systemProxy.cjs');
+// systemProxy.cjs itself is reached only through the controller -- main never
+// writes the registry directly any more.
+const { SystemProxyController } = require('./lib/systemProxyController.cjs');
 const killSwitch = require('./lib/killSwitch.cjs');
-const { tcpPing } = require('./lib/pingTest.cjs');
+const { measurePing } = require('./lib/pingTest.cjs');
 const { proxyPing } = require('./lib/proxyPing.cjs');
+const { lookupPublicIp } = require('./lib/publicIp.cjs');
 const serverTest = require('./lib/serverTest.cjs');
 const { testLocalProxy } = require('./lib/localProxyTest.cjs');
 const { fetchText } = require('./lib/fetchText.cjs');
@@ -101,8 +103,24 @@ const store = new JsonStore(path.join(userDataDir, 'profiles.json'), {
   subscriptions: [],
   activeProfileId: null,
   settings: { ...DEFAULT_SETTINGS },
-  systemProxyEnabled: false, // app-owned live state, not a user preference -- set only by systemProxy:enable/disable and the disconnect safety net
+  // Persisted USER INTENT for system proxy -- "route my system through the
+  // tunnel". Deliberately not "is it on right now": that is read back from the
+  // Windows registry by SystemProxyController, which is the only thing allowed
+  // to answer it. Intent survives disconnect and restart; application does not.
+  systemProxyDesired: false,
+  systemProxySaved: null,      // the user's own proxy config, parked while ours is active
+  systemProxyKnownPorts: [],   // ports we have written, so leftovers stay recognisable
 });
+
+// Migration: `systemProxyEnabled` used to be a single boolean conflating intent
+// with live state. Carry it over as intent once, then drop it.
+if ('systemProxyEnabled' in store.data) {
+  if (store.get('systemProxyEnabled', false) && !store.get('systemProxyDesired', false)) {
+    store.set('systemProxyDesired', true);
+  }
+  delete store.data.systemProxyEnabled;
+  store.set('systemProxyDesired', store.get('systemProxyDesired', false));
+}
 
 // Packaged, extraResources flattens the per-arch binary and the shared .dat
 // files into one resources/bin. In the repo they're split: xray.exe lives in
@@ -163,6 +181,22 @@ let sessionTraffic = { uplink: 0, downlink: 0 };
 let subAutoUpdateTimer = null;
 let connectedAt = null;
 let currentPorts = null; // { socksPort, httpPort, apiPort, probeHttpPort } of the live session
+
+// ---- Tunnel status (public exit IP) ----
+//
+// What the outside world sees us as, measured from the outside, through the
+// tunnel. See lib/publicIp.cjs for why that is the only way to know it.
+// `baselineIp` is this machine's own un-tunnelled address, sampled only while
+// disconnected -- it exists purely so the UI can state whether the tunnel
+// actually changed anything. Held in memory only; never written to disk.
+let tunnelStatus = { phase: 'idle' };
+let tunnelTimer = null;
+let tunnelProbeInFlight = false;
+// undefined, not null: `null` is the legitimate "no live session" key, and
+// starting there would make the very first (disconnected) call a no-op.
+let tunnelSessionKey;
+let baselineIp = { ip: null, at: 0, inFlight: false };
+const BASELINE_TTL_MS = 15 * 60 * 1000;
 
 // ---- Smart Routing ----
 //
@@ -309,6 +343,43 @@ function sendToWindow(channel, payload) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
 }
 
+// ---- System proxy ----
+//
+// Everything about Windows' proxy configuration goes through this one object.
+// It reads the registry back rather than trusting a cached flag, so what the
+// UI shows is what Windows actually has. See lib/systemProxyController.cjs.
+//
+// The tunnel it points at is always the PUBLIC http port: that is the listener
+// the rest of the machine can reach (with Smart Routing on, the dispatcher owns
+// it and applies the user's rules -- which is exactly what system traffic
+// should be subject to). probeHttpPort, used by the latency/IP probes, is the
+// opposite choice on purpose and must not be used here.
+const systemProxyController = new SystemProxyController({
+  store,
+  getSettings: () => getSettings(),
+  getTunnel: () => {
+    if (connectionState !== 'connected' || !currentPorts) return { connected: false };
+    return {
+      connected: true,
+      host: dialHost(getSettings().httpHost),
+      port: currentPorts.httpPort,
+    };
+  },
+  // Renderer only -- the tray menu doesn't surface proxy state, so rebuilding
+  // it here would be pure churn on every drift tick.
+  onChange: (status) => sendToWindow('system-proxy-status', status),
+  notify: (title, body) => notify(title, body),
+});
+
+// Fire-and-forget wrapper: no caller should ever be blocked on, or able to
+// fail because of, a registry reconcile.
+function syncSystemProxy(reason, force = false) {
+  return systemProxyController.reconcile({ reason, force }).catch((err) => {
+    if (process.env.SC_DEBUG) console.error('[system-proxy] reconcile failed:', err.message);
+    return systemProxyController.status();
+  });
+}
+
 function updateHealthMonitoring() {
   const s = getSettings();
   const key = connectionState === 'connected' && currentPorts
@@ -352,12 +423,9 @@ failover.on('switch', async ({ candidate, reason, reasonText, candidateScore, cu
   });
   try {
     await serialize(() => connect(candidate.id));
-    if (store.get('systemProxyEnabled', false) && currentPorts) {
-      try {
-        const s = getSettings();
-        await systemProxy.enable(dialHost(s.httpHost), currentPorts.httpPort, systemProxy.buildBypass(s.customBypass));
-      } catch { /* the tunnel is up; the proxy resync is best effort */ }
-    }
+    // connect() already reconciles, but the new tunnel can land on a different
+    // port than the old one -- force a re-apply so Windows follows it there.
+    await syncSystemProxy('failover', true);
     const ev = failover.noteSwitchResult({ ok: true, fromProfile: from, toProfile: candidate, reason });
     notify('تعویض خودکار سرور', `${reasonText} — به «${candidate.name}» منتقل شدی`);
     sendToWindow('failover-event', { phase: 'done', ...ev, fromScore: currentScore, toScore: candidateScore });
@@ -421,7 +489,10 @@ function sendState() {
       connectionState,
       activeProfileId: store.get('activeProfileId', null),
       connectedAt,
-      systemProxyEnabled: store.get('systemProxyEnabled', false),
+      // The verified registry-backed status, not a stored guess. Kept under
+      // the old key's spirit but as an object -- consumers read `.active` for
+      // "Windows is routing through us right now" and `.desired` for intent.
+      systemProxy: systemProxyController.status(),
       killSwitchBlocking,
       soulModeEnabled: store.get('soulModeEnabled', false),
       // The pool server we landed on, so the UI can name it without holding a
@@ -435,6 +506,7 @@ function sendState() {
   updateLatencyPolling();
   updateTrafficPolling();
   updateHealthMonitoring();
+  updateTunnelPolling();
 }
 
 function updateTray() {
@@ -536,6 +608,103 @@ function updateLatencyPolling() {
   };
   poll();
   latencyTimer = setInterval(poll, LATENCY_POLL_MS);
+}
+
+// ---- Tunnel status ----
+//
+// Where to send a probe so it is guaranteed to cross the tunnel. Same reasoning
+// as the latency poll: with Smart Routing's dispatcher in front, the public port
+// is subject to the user's rules and could legitimately answer over a DIRECT
+// connection -- which for an IP lookup would report the user's real address and
+// claim it was the tunnel's. probeHttpPort is always xray's own inbound.
+function tunnelProxyTarget() {
+  if (connectionState !== 'connected' || !currentPorts) return null;
+  const s = getSettings();
+  const throughDispatcher = currentPorts.probeHttpPort !== currentPorts.httpPort;
+  return {
+    host: throughDispatcher ? '127.0.0.1' : dialHost(s.httpHost),
+    port: currentPorts.probeHttpPort,
+    username: s.httpUsername,
+    password: s.httpPassword,
+  };
+}
+
+function setTunnelStatus(patch) {
+  tunnelStatus = { ...tunnelStatus, ...patch };
+  sendToWindow('tunnel-status', tunnelStatus);
+}
+
+// Sampled only while disconnected -- once a tunnel (or worse, TUN mode) is up,
+// there is no such thing as a "direct" request from here, and a reading taken
+// then would be the tunnel's own address masquerading as the baseline.
+function refreshBaselineIp() {
+  if (baselineIp.inFlight) return;
+  if (baselineIp.ip && Date.now() - baselineIp.at < BASELINE_TTL_MS) return;
+  baselineIp.inFlight = true;
+  lookupPublicIp({ timeoutMs: 7000 })
+    .then((info) => { baselineIp = { ip: info.ip, at: Date.now(), inFlight: false }; })
+    .catch(() => { baselineIp = { ...baselineIp, inFlight: false }; });
+}
+
+const TUNNEL_IP_POLL_MS = 20000;
+
+async function probeTunnelIp() {
+  const proxy = tunnelProxyTarget();
+  if (!proxy) return tunnelStatus;
+  if (tunnelProbeInFlight) return tunnelStatus;
+  tunnelProbeInFlight = true;
+  // Captured so a result that lands after a reconnect/disconnect is discarded
+  // instead of being attributed to the session that replaced it.
+  const ports = currentPorts;
+  setTunnelStatus({ phase: tunnelStatus.ip ? 'refreshing' : 'probing', message: null });
+  try {
+    const info = await lookupPublicIp({ proxy, timeoutMs: 9000 });
+    if (currentPorts !== ports || connectionState !== 'connected') return tunnelStatus;
+    const profile = findProfile(store.get('activeProfileId'));
+    setTunnelStatus({
+      phase: 'ok',
+      ...info,
+      checkedAt: Date.now(),
+      message: null,
+      baselineIp: baselineIp.ip,
+      // The exit is allowed to be the server itself (a plain, non-fronted
+      // server egresses from its own address) -- but the user asked to be told,
+      // so say it rather than leave them guessing.
+      matchesServer: !!profile && profile.address === info.ip,
+    });
+  } catch (err) {
+    if (currentPorts !== ports || connectionState !== 'connected') return tunnelStatus;
+    if (process.env.SC_DEBUG) console.error('[tunnel-ip]', err.message, err.detail || '');
+    setTunnelStatus({ phase: 'error', message: err.message, checkedAt: Date.now() });
+  } finally {
+    tunnelProbeInFlight = false;
+  }
+  return tunnelStatus;
+}
+
+function updateTunnelPolling() {
+  // Keyed on the live session, because sendState() fires for plenty of things
+  // that have nothing to do with the tunnel (system-proxy toggles, routing
+  // changes) and each one would otherwise restart the timer and re-probe.
+  const key = connectionState === 'connected' && currentPorts
+    ? `${store.get('activeProfileId')}:${connectedAt}`
+    : null;
+  if (key === tunnelSessionKey) return;
+  tunnelSessionKey = key;
+
+  if (tunnelTimer) { clearInterval(tunnelTimer); tunnelTimer = null; }
+
+  if (!key) {
+    setTunnelStatus({
+      phase: 'idle', ip: null, country: null, countryCode: null, city: null,
+      isp: null, asn: null, source: null, checkedAt: null, message: null,
+      matchesServer: false, family: null,
+    });
+    refreshBaselineIp();
+    return;
+  }
+  probeTunnelIp();
+  tunnelTimer = setInterval(probeTunnelIp, TUNNEL_IP_POLL_MS);
 }
 
 function updateTrafficPolling() {
@@ -756,9 +925,9 @@ async function connect(profileId) {
       httpAccounts: settings.httpUsername ? [{ user: settings.httpUsername, pass: settings.httpPassword || '' }] : undefined,
       routingRules,
     };
-    // Connecting only starts the local proxy (xray) -- System Proxy is a fully
-    // separate, user-controlled toggle (see systemProxy:enable/disable below)
-    // so flipping it on/off never restarts the tunnel.
+    // Connecting starts the local proxy (xray). Whether Windows is *pointed* at
+    // it is a separate, persisted user choice -- applied on success below, and
+    // never the other way round: toggling system proxy never restarts a tunnel.
     await xray.start(buildXrayConfig(profile, dispatch ? { ...baseOpts, dispatchPorts: dispatch } : baseOpts));
 
     let probeHttpPort = httpPort;
@@ -795,6 +964,11 @@ async function connect(profileId) {
     reconnectAttempts = 0;
     connectionState = 'connected';
     sendState();
+    // The tunnel is up, so honour the user's standing intent: if they asked for
+    // the system to go through it, point Windows at the port we just bound.
+    // This is what makes the choice survive disconnect/reconnect/restart --
+    // previously nothing re-applied it and the toggle appeared to reset itself.
+    await syncSystemProxy('connect', true);
     notify('Soul Connection', `به «${profile.name}» متصل شدی`);
     if (getSettings().killSwitchEnabled) {
       killSwitchArmed = true;
@@ -805,6 +979,9 @@ async function connect(profileId) {
     currentPorts = null;
     connectedAt = null;
     await stopDispatcher();
+    // A half-built session may have left Windows pointed at a port that never
+    // came up.
+    await syncSystemProxy('connect-failed');
     sendState();
     if (mode === 'tun' && /access is denied/i.test(err.message || '')) {
       throw new Error('حالت تانل نیاز به اجرای برنامه با دسترسی مدیر (Administrator) دارد');
@@ -816,67 +993,11 @@ async function connect(profileId) {
   }
 }
 
-// Is anything accepting connections on this loopback port right now?
-function portAccepts(host, port, timeoutMs = 700) {
-  return new Promise((resolve) => {
-    const socket = new net.Socket();
-    let done = false;
-    const finish = (ok) => { if (!done) { done = true; socket.destroy(); resolve(ok); } };
-    socket.setTimeout(timeoutMs);
-    socket.once('connect', () => finish(true));
-    socket.once('error', () => finish(false));
-    socket.once('timeout', () => finish(false));
-    socket.connect(port, host);
-  });
-}
-
-// See the call site in whenReady for why this exists. Deliberately narrow:
-// it clears a stranded proxy, never a working or third-party one.
-async function reconcileSystemProxy() {
-  if (connectionState !== 'disconnected') return;
-
-  let current;
-  try {
-    current = await systemProxy.read();
-  } catch {
-    return; // can't read the registry -- do nothing rather than guess
-  }
-  if (!current.enabled || !current.port) {
-    // Nothing enabled: make sure our own bookkeeping agrees, so the UI toggle
-    // doesn't claim system proxy is on when Windows says otherwise.
-    if (store.get('systemProxyEnabled', false)) store.set('systemProxyEnabled', false);
-    return;
-  }
-
-  if (!systemProxy.isLoopback(current.host)) return; // not ours
-
-  const settings = getSettings();
-  const ourPorts = new Set([settings.httpPort, settings.socksPort, HTTP_PORT, SOCKS_PORT]);
-  if (!ourPorts.has(current.port)) return; // loopback, but not a port we use
-
-  // Last check before touching anything: if something is actually serving
-  // there, the proxy is live and must be left in place.
-  if (await portAccepts(dialHost(current.host), current.port)) return;
-
-  try {
-    await systemProxy.disable();
-    store.set('systemProxyEnabled', false);
-    notify(
-      'پروکسی سیستم پاک شد',
-      'پروکسی سیستم روی پورت خاموش برنامه مانده بود و اینترنت را قطع می‌کرد. برطرف شد.'
-    );
-  } catch { /* best effort */ }
-}
-
-// Safety net: a dead local proxy port left as the active Windows system proxy
-// means no internet for the user, so any time the tunnel actually stops we
-// clear system proxy too. This is distinct from systemProxy:disable, which
-// the user can call independently at any time without touching the tunnel.
-async function disableSystemProxySafetyNet() {
-  if (!store.get('systemProxyEnabled', false)) return;
-  try { await systemProxy.disable(); } catch { /* ignore */ }
-  store.set('systemProxyEnabled', false);
-}
+// Both reconcileSystemProxy() and disableSystemProxySafetyNet() used to live
+// here. They are gone: every one of their jobs -- clearing a stranded proxy at
+// startup, withdrawing on disconnect, refusing to touch a third-party config --
+// is now a consequence of syncSystemProxy() comparing intent against the actual
+// registry, so there is nothing left for a special case to get out of step with.
 
 // Engages the outbound-block firewall rules. Idempotent and best-effort --
 // if it fails (most likely: not actually elevated), we surface a notification
@@ -906,7 +1027,10 @@ async function disconnect() {
   if (connectionState === 'disconnected') return;
   connectionState = 'disconnecting';
   sendState();
-  await disableSystemProxySafetyNet();
+  // Withdraw BEFORE the listener dies: Windows pointed at a port that has just
+  // stopped accepting connections means no internet at all. The user's intent
+  // is left intact, so the next connect puts it straight back.
+  await syncSystemProxy('disconnect');
   // Only claim an exit if there's actually a process left to exit. Setting this
   // unconditionally leaks a stale `true` whenever we disconnect with no live
   // process (e.g. tearing down a failed 'connecting' attempt), and the next
@@ -940,6 +1064,10 @@ xray.on('exit', async () => {
   // The tunnel died under it -- the dispatcher would keep accepting
   // connections and forwarding them into ports nothing is listening on.
   await stopDispatcher();
+  // Before anything else: the listener Windows was pointed at is gone, so the
+  // proxy has to come off or the user has no internet while we retry. Intent is
+  // preserved, so a successful reconnect below re-applies it automatically.
+  await syncSystemProxy('drop');
   sendState();
 
   const killSwitchSettings = getSettings();
@@ -952,14 +1080,12 @@ xray.on('exit', async () => {
   }
 
   if (!getSettings().autoReconnect) {
-    await disableSystemProxySafetyNet();
     notify('اتصال قطع شد', 'تونل به‌طور غیرمنتظره قطع شد.');
     return;
   }
 
   const profileId = store.get('activeProfileId');
   if (!profileId || reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-    await disableSystemProxySafetyNet();
     notify('اتصال قطع شد', 'تلاش برای اتصال مجدد ناموفق بود.');
     reconnectAttempts = 0;
     return;
@@ -975,12 +1101,7 @@ xray.on('exit', async () => {
   if (store.get('soulModeEnabled', false) && soulPool.find(profileId)) {
     try {
       await connectBestSoul();
-      if (store.get('systemProxyEnabled', false) && currentPorts) {
-        try {
-          const s = getSettings();
-          await systemProxy.enable(dialHost(s.httpHost), currentPorts.httpPort, systemProxy.buildBypass(s.customBypass));
-        } catch { /* ignore */ }
-      }
+      await syncSystemProxy('reconnect', true);
     } catch { /* the retry cap above still governs how often this repeats */ }
     return;
   }
@@ -988,14 +1109,9 @@ xray.on('exit', async () => {
   try {
     await serialize(() => connect(profileId));
     // A successful reconnect can land on a different port than before (port
-    // conflict fallback) -- if system proxy was on, resync it to the new
-    // port instead of leaving it pointed at the now-dead old one.
-    if (store.get('systemProxyEnabled', false) && currentPorts) {
-      try {
-        const s = getSettings();
-        await systemProxy.enable(dialHost(s.httpHost), currentPorts.httpPort, systemProxy.buildBypass(s.customBypass));
-      } catch { /* ignore */ }
-    }
+    // conflict fallback), so force a re-apply rather than trusting that the
+    // registry still points somewhere useful.
+    await syncSystemProxy('reconnect', true);
   } catch { /* xray's own 'exit' event will fire again and retry, up to the cap */ }
 });
 
@@ -1036,6 +1152,14 @@ app.whenReady().then(async () => {
   app.setLoginItemSettings({ openAtLogin: !!settings.launchOnStartup });
   scheduleSubAutoUpdate();
 
+  // Sample this machine's own public address now, while nothing is tunnelled.
+  // It is the only moment a "direct" reading is meaningful, and it's what lets
+  // the Tunnel Status panel say whether the tunnel actually changed anything.
+  // Deliberately after launch settles, and never on the connect path.
+  setTimeout(() => {
+    if (connectionState === 'disconnected') refreshBaselineIp();
+  }, 4000);
+
   // Sync in-memory Kill Switch state with whatever's actually on the
   // firewall right now. If the feature is off, proactively clean up any
   // rule left behind by a previous crash -- the stored preference is the
@@ -1057,10 +1181,13 @@ app.whenReady().then(async () => {
   // like "every server is broken". The normal disconnect path clears this, but
   // by definition none of those endings run it.
   //
-  // Only ever touches a proxy that is unmistakably ours: loopback host, our own
-  // configured port, and nothing accepting connections there right now. A proxy
-  // the user set up for anything else is left strictly alone.
-  reconcileSystemProxy().catch(() => {});
+  // Only ever touches a proxy that is unmistakably ours: loopback host on a
+  // port we use or have used. A proxy the user set up for anything else is left
+  // strictly alone (and, if we had parked their config, restored).
+  //
+  // This is also what re-synchronises the UI on every launch: the toggle's
+  // state comes from this read of the registry, not from what we last believed.
+  syncSystemProxy('startup');
 
   if (settings.runLocalProxyOnStartup) {
     const profileId = store.get('activeProfileId');
@@ -1105,9 +1232,7 @@ async function installUpdate() {
 
   // Belt and braces -- if the tunnel teardown above threw partway, make sure
   // the system proxy isn't left pointing at a port nothing is listening on.
-  try {
-    if (store.get('systemProxyEnabled', false)) await systemProxy.disable();
-  } catch { /* best effort */ }
+  await systemProxyController.withdrawForShutdown();
 
   store.flush();
   quitAndInstall();
@@ -1121,15 +1246,36 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('will-quit', async (e) => {
-  if (connectionState !== 'disconnected') {
-    e.preventDefault();
-    await serialize(disconnect);
-    store.flush();
-    app.quit();
-  } else {
-    store.flush();
-  }
+// Teardown has to run before the process goes away, but app.quit() re-fires
+// will-quit -- so the work happens exactly once and the second pass falls
+// straight through, otherwise preventDefault + quit() loops forever.
+let quitCleanupDone = false;
+app.on('will-quit', (e) => {
+  if (quitCleanupDone) { store.flush(); return; }
+  e.preventDefault();
+  quitCleanupDone = true;
+  systemProxyController.stop();
+  (async () => {
+    try {
+      try {
+        if (connectionState !== 'disconnected') await serialize(disconnect);
+      } catch { /* still have to clean up the proxy below */ }
+      // disconnect() withdraws it, but a teardown that threw partway -- or a
+      // previous run that died mid-session -- must not leave Windows pointed at
+      // a port that no longer exists. This is the last chance to undo that.
+      //
+      // Capped: this shells out to reg.exe, and an app that cannot be closed
+      // because a registry call hung is worse than a proxy left behind (which
+      // the next launch reconciles anyway).
+      await Promise.race([
+        systemProxyController.withdrawForShutdown(),
+        new Promise((r) => setTimeout(r, 4000)),
+      ]);
+    } catch { /* fall through -- quitting must happen regardless */ } finally {
+      try { store.flush(); } catch { /* ignore */ }
+      app.quit();
+    }
+  })();
 });
 
 // ---- IPC handlers ----
@@ -1153,7 +1299,7 @@ ipcMain.handle('profiles:list', () => ({
   connectionState,
   connectedAt,
   settings: getSettings(),
-  systemProxyEnabled: store.get('systemProxyEnabled', false),
+  systemProxy: systemProxyController.status(),
   killSwitchBlocking,
   soulModeEnabled: store.get('soulModeEnabled', false),
   soulCount: soulPool.list().length,
@@ -1481,17 +1627,63 @@ async function connectBestSoul() {
 
 ipcMain.handle('soul:connectBest', () => connectBestSoul());
 
+ipcMain.handle('tunnel:get', () => ({ ...tunnelStatus, baselineIp: baselineIp.ip }));
+
+ipcMain.handle('tunnel:refresh', async () => {
+  if (connectionState !== 'connected') return { ...tunnelStatus };
+  return probeTunnelIp();
+});
+
 ipcMain.handle('connection:status', () => ({
   connectionState,
   activeProfileId: store.get('activeProfileId', null),
   killSwitchBlocking,
 }));
 
+// A real measurement, and the most real one available for this profile:
+//   * the server we are currently tunnelling through gets measured THROUGH the
+//     tunnel -- an actual request out to the internet and back, which is the
+//     latency the user is living with rather than the distance to the front door.
+//   * everything else gets repeated TCP handshakes with DNS factored out
+//     (see lib/pingTest.cjs). No scores, no interpolation, no cached guesses.
 ipcMain.handle('ping:test', async (_e, profileId) => {
   const profile = findProfile(profileId);
   if (!profile) throw new Error('کانفیگ پیدا نشد');
-  const ms = await tcpPing(profile.address, profile.port, 5000);
-  return { profileId, ms };
+
+  const live = connectionState === 'connected' && currentPorts && store.get('activeProfileId') === profileId;
+  if (live) {
+    const target = tunnelProxyTarget();
+    if (target) {
+      const samples = [];
+      for (let i = 0; i < 3; i++) {
+        // eslint-disable-next-line no-await-in-loop
+        // 6s, not proxyPing's 12s default: this backs a button the user is
+        // watching, and a tunnel that needs longer than that has already
+        // answered the question.
+        samples.push(await proxyPing(target, 6000));
+        if (samples.some((s) => s < 0)) break; // tunnel isn't passing traffic; don't wait out two more timeouts
+      }
+      const ok = samples.filter((s) => s > 0).sort((a, b) => a - b);
+      if (ok.length) {
+        return {
+          profileId,
+          method: 'tunnel',
+          ms: ok[Math.floor(ok.length / 2)],
+          min: ok[0],
+          max: ok[ok.length - 1],
+          avg: Math.round(ok.reduce((a, b) => a + b, 0) / ok.length),
+          jitter: ok.length > 1 ? Math.round(ok[ok.length - 1] - ok[0]) : null,
+          loss: Math.round(((samples.length - ok.length) / samples.length) * 100),
+          samples,
+        };
+      }
+      // Tunnel up but nothing passing -- fall through to the TCP measurement so
+      // the user still learns whether the server itself is reachable.
+    }
+  }
+
+  const result = await measurePing(profile.address, profile.port, { count: 5, timeoutMs: 3000, gapMs: 80 });
+  return { profileId, ...result };
 });
 
 // ---- Server Finder test engine ----
@@ -1661,6 +1853,12 @@ ipcMain.handle('settings:update', async (_e, patch) => {
     healthSessionKey = null;
     updateHealthMonitoring();
   }
+  // The bypass list is written into ProxyOverride, and the host is half of what
+  // ProxyServer points at -- edit either while the proxy is live and Windows is
+  // now running settings the user has already changed. Push them through.
+  if ('customBypass' in clean || 'httpHost' in clean || 'httpPort' in clean) {
+    syncSystemProxy('settings', true).then(() => sendState());
+  }
   return settings;
 });
 
@@ -1672,25 +1870,32 @@ ipcMain.handle('app:openProxyFolder', () => {
   shell.openPath(xrayWorkDir);
 });
 
-// System Proxy is fully decoupled from the tunnel: enabling it only points
-// Windows at the already-running local proxy, disabling it only resets the
-// registry -- neither one starts/stops xray.
-ipcMain.handle('systemProxy:enable', async () => {
-  if (connectionState !== 'connected' || !currentPorts) {
-    throw new Error('اول باید پروکسی محلی را روشن کنی (به یک سرور وصل شو)');
-  }
-  const settings = getSettings();
-  await systemProxy.enable(dialHost(settings.httpHost), currentPorts.httpPort, systemProxy.buildBypass(settings.customBypass));
-  store.set('systemProxyEnabled', true);
+// These set INTENT and let the controller decide what that means right now.
+// Turning it on without a tunnel is allowed and is not an error: the choice is
+// recorded, reported back as `pending`, and applied the moment a tunnel exists.
+// Never starts or stops xray in either direction.
+ipcMain.handle('systemProxy:setDesired', async (_e, desired) => {
+  const status = await systemProxyController.setDesired(!!desired);
   sendState();
-  return true;
+  // Asking for it with no tunnel to point at is a legitimate state, but the
+  // user should hear why nothing changed on their machine yet.
+  if (status.desired && !status.active && !status.tunnelUp) {
+    return { ...status, note: 'ثبت شد — به‌محض اتصال به سرور، پروکسی سیستم اعمال می‌شود' };
+  }
+  if (status.desired && !status.active && status.lastError) {
+    throw new Error(status.lastError);
+  }
+  return status;
 });
 
-ipcMain.handle('systemProxy:disable', async () => {
-  await systemProxy.disable();
-  store.set('systemProxyEnabled', false);
+ipcMain.handle('systemProxy:get', () => systemProxyController.status());
+
+// Force a fresh read+converge; what the Settings screen calls when the user
+// wants to be sure, and what the renderer calls on window focus.
+ipcMain.handle('systemProxy:sync', async () => {
+  const status = await syncSystemProxy('manual', true);
   sendState();
-  return true;
+  return status;
 });
 
 ipcMain.handle('network:testConnection', async (_e, { protocol }) => {

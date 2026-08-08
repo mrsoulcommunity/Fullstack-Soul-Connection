@@ -32,11 +32,11 @@ function updaterStatusHint(updaterStatus) {
 }
 
 export default function SettingsView({
-  settings, connectionState, profiles, appInfo, systemProxyEnabled,
+  settings, connectionState, profiles, appInfo, systemProxy,
   updaterStatus, onCheckForUpdates, onDownloadUpdate, onInstallUpdate,
   onUpdate, onUpdateChecked, onOpenLogsFolder,
   onExportBackup, onImportBackup, onResetUsage, onResetAllUsage,
-  onSystemProxyEnable, onSystemProxyDisable, onOpenProxyFolder, onResetNetworkDefaults,
+  onSystemProxySetDesired, onSystemProxySync, onOpenProxyFolder, onResetNetworkDefaults,
   killSwitchBlocking, health, failover,
 }) {
   const portsLocked = connectionState !== 'disconnected';
@@ -103,12 +103,12 @@ export default function SettingsView({
       <NetworkSettings
         settings={settings}
         connectionState={connectionState}
-        systemProxyEnabled={systemProxyEnabled}
+        systemProxy={systemProxy}
         killSwitchBlocking={killSwitchBlocking}
         onUpdate={onUpdate}
         onUpdateChecked={onUpdateChecked}
-        onSystemProxyEnable={onSystemProxyEnable}
-        onSystemProxyDisable={onSystemProxyDisable}
+        onSystemProxySetDesired={onSystemProxySetDesired}
+        onSystemProxySync={onSystemProxySync}
         onOpenProxyFolder={onOpenProxyFolder}
         onResetNetworkDefaults={onResetNetworkDefaults}
       />

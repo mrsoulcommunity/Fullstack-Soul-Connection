@@ -8,8 +8,10 @@ import ServerFinder from './components/ServerFinder.jsx';
 import SoulPoolEntry from './components/SoulPoolEntry.jsx';
 import RoutingRules from './components/RoutingRules.jsx';
 import { FailoverStatus } from './components/FailoverSettings.jsx';
+import TunnelStatus from './components/TunnelStatus.jsx';
 import Icon from './components/Icon.jsx';
 import { loadSession, saveSession, clearSession } from './utils/sessionState.js';
+import { pingMs, toEntry } from './utils/ping.js';
 
 const PING_CONCURRENCY = 12;
 
@@ -149,7 +151,10 @@ export default function App() {
   const [refreshingSubIds, setRefreshingSubIds] = useState(() => new Set());
   const [finderOpen, setFinderOpen] = useState(false);
   const [windowMaximized, setWindowMaximized] = useState(false);
-  const [systemProxyEnabled, setSystemProxyEnabled] = useState(false);
+  // Registry-verified system-proxy status from main, never a local guess.
+  // `desired` is the user's standing intent, `active` is what Windows really
+  // has right now -- the UI must never conflate them.
+  const [systemProxy, setSystemProxy] = useState({ desired: false, active: false, pending: false });
   const [killSwitchBlocking, setKillSwitchBlocking] = useState(false);
   // Smart Routing / health / failover. `routingNeedsReconnect` is sticky until
   // the next connect: a domain-rule change only reaches xray when the tunnel is
@@ -167,6 +172,19 @@ export default function App() {
     return () => off && off();
   }, []);
 
+  // System proxy has its own push channel because it changes for reasons the
+  // connection state knows nothing about: the drift watcher noticing the user
+  // (or another app) altered Windows' settings behind our back.
+  useEffect(() => {
+    const off = window.soul.onSystemProxyStatus?.((s) => setSystemProxy(s));
+    window.soul.systemProxyGet?.().then((s) => { if (s) setSystemProxy(s); }).catch(() => {});
+    // Coming back to the window is the likeliest moment for the user to have
+    // just changed something in Internet Options, so re-read then too.
+    const onFocus = () => { window.soul.systemProxyGet?.().then((s) => { if (s) setSystemProxy(s); }).catch(() => {}); };
+    window.addEventListener('focus', onFocus);
+    return () => { if (off) off(); window.removeEventListener('focus', onFocus); };
+  }, []);
+
   const refresh = useCallback(async () => {
     const data = await window.soul.listProfiles();
     setProfiles(data.profiles);
@@ -176,7 +194,7 @@ export default function App() {
     setConnectionState(data.connectionState);
     setConnectedAt(data.connectedAt);
     setSettings(data.settings);
-    setSystemProxyEnabled(data.systemProxyEnabled);
+    if (data.systemProxy) setSystemProxy(data.systemProxy);
     setKillSwitchBlocking(!!data.killSwitchBlocking);
     setSoulMode(!!data.soulModeEnabled);
     setSoulCount(data.soulCount || 0);
@@ -254,11 +272,11 @@ export default function App() {
   useEffect(() => {
     refresh();
     window.soul.getAppInfo().then(setAppInfo).catch(() => {});
-    const offState = window.soul.onStateChanged(({ connectionState, activeProfileId, connectedAt, systemProxyEnabled, killSwitchBlocking, soulModeEnabled, activeSoulProfile }) => {
+    const offState = window.soul.onStateChanged(({ connectionState, activeProfileId, connectedAt, systemProxy: sp, killSwitchBlocking, soulModeEnabled, activeSoulProfile }) => {
       setConnectionState(connectionState);
       setActiveProfileId(activeProfileId);
       setConnectedAt(connectedAt);
-      setSystemProxyEnabled(systemProxyEnabled);
+      if (sp) setSystemProxy(sp);
       setKillSwitchBlocking(!!killSwitchBlocking);
       setSoulMode(!!soulModeEnabled);
       setActiveSoulProfile(activeSoulProfile || null);
@@ -544,14 +562,18 @@ export default function App() {
     showToast('کانفیگ به‌روزرسانی شد');
   }, [showToast]);
 
+  // Keeps the previous reading visible while a new one is in flight, so a
+  // re-ping doesn't blank the row out and shift the layout under the cursor.
   const handlePing = useCallback(async (id) => {
-    setPings((p) => ({ ...p, [id]: 'measuring' }));
+    // `method` rides along so the "measured through the tunnel" marker doesn't
+    // blink off and back on during a re-measure of the connected server.
+    setPings((p) => ({ ...p, [id]: { status: 'measuring', prev: pingMs(p[id]), method: p[id]?.method } }));
     try {
-      const { ms } = await window.soul.pingTest(id);
-      setPings((p) => ({ ...p, [id]: ms }));
-      return ms;
-    } catch {
-      setPings((p) => ({ ...p, [id]: -1 }));
+      const entry = toEntry(await window.soul.pingTest(id));
+      setPings((p) => ({ ...p, [id]: entry }));
+      return pingMs(entry) ?? -1;
+    } catch (err) {
+      setPings((p) => ({ ...p, [id]: { status: 'fail', message: err.message, at: Date.now() } }));
       return -1;
     }
   }, []);
@@ -723,23 +745,30 @@ export default function App() {
     setProfiles(updated);
   }
 
-  const handleSystemProxyEnable = useCallback(async () => {
+  // Never sets local state optimistically: main answers with what Windows
+  // actually ended up in, and that is the only thing rendered. An optimistic
+  // `true` here is precisely how the old UI came to claim a proxy that had
+  // failed to apply.
+  const handleSystemProxySetDesired = useCallback(async (desired) => {
     try {
-      await window.soul.systemProxyEnable();
-      setSystemProxyEnabled(true);
-      showToast('پروکسی سیستم فعال شد');
+      const status = await window.soul.systemProxySetDesired(desired);
+      if (status) setSystemProxy(status);
+      if (status?.note) showToast(status.note);
+      else if (desired) showToast(status?.active ? 'پروکسی سیستم فعال شد' : 'ثبت شد');
+      else showToast('پروکسی سیستم بازنشانی شد');
     } catch (err) {
-      showToast(err.message || 'خطا در فعال‌سازی پروکسی سیستم', 'error');
+      showToast(err.message || 'خطا در تنظیم پروکسی سیستم', 'error');
+      window.soul.systemProxyGet?.().then((s) => { if (s) setSystemProxy(s); }).catch(() => {});
     }
   }, [showToast]);
 
-  const handleSystemProxyDisable = useCallback(async () => {
+  const handleSystemProxySync = useCallback(async () => {
     try {
-      await window.soul.systemProxyDisable();
-      setSystemProxyEnabled(false);
-      showToast('پروکسی سیستم بازنشانی شد');
+      const status = await window.soul.systemProxySync();
+      if (status) setSystemProxy(status);
+      showToast(status?.lastError ? status.lastError : 'وضعیت پروکسی سیستم بررسی شد', status?.lastError ? 'error' : 'info');
     } catch (err) {
-      showToast(err.message || 'خطا در بازنشانی پروکسی سیستم', 'error');
+      showToast(err.message || 'بررسی ناموفق بود', 'error');
     }
   }, [showToast]);
 
@@ -886,13 +915,26 @@ export default function App() {
           </header>
 
           {tab === 'servers' ? (
-            <ConnectHero
-              connectionState={connectionState}
-              connectionMode={connectionMode}
-              activeProfile={activeProfile}
-              onToggle={handleToggleConnect}
-              onSetMode={handleSetMode}
-            />
+            <>
+              <ConnectHero
+                connectionState={connectionState}
+                connectionMode={connectionMode}
+                activeProfile={activeProfile}
+                onToggle={handleToggleConnect}
+                onSetMode={handleSetMode}
+              />
+              {/* Sits between the hero and the metrics rail: the hero is the
+                  action, this is the proof it worked, the rail is the running
+                  telemetry. It renders nothing at all while disconnected, so
+                  the idle screen stays exactly as it was. */}
+              <TunnelStatus
+                connectionState={connectionState}
+                latencyMs={latencyMs}
+                activeProfile={activeProfile}
+                systemProxy={systemProxy}
+                onToast={showToast}
+              />
+            </>
           ) : tab === 'routing' ? (
             <div className="settings-pane">
               <RoutingRules
@@ -916,7 +958,7 @@ export default function App() {
                   connectionState={connectionState}
                   profiles={profiles}
                   appInfo={appInfo}
-                  systemProxyEnabled={systemProxyEnabled}
+                  systemProxy={systemProxy}
                   updaterStatus={updaterStatus}
                   onCheckForUpdates={() => window.soul.checkForUpdates()}
                   onDownloadUpdate={() => window.soul.downloadUpdate()}
@@ -928,8 +970,8 @@ export default function App() {
                   onImportBackup={handleImportBackup}
                   onResetUsage={handleResetUsage}
                   onResetAllUsage={handleResetAllUsage}
-                  onSystemProxyEnable={handleSystemProxyEnable}
-                  onSystemProxyDisable={handleSystemProxyDisable}
+                  onSystemProxySetDesired={handleSystemProxySetDesired}
+                  onSystemProxySync={handleSystemProxySync}
                   onOpenProxyFolder={handleOpenProxyFolder}
                   onResetNetworkDefaults={handleResetNetworkDefaults}
                   killSwitchBlocking={killSwitchBlocking}
@@ -961,7 +1003,7 @@ export default function App() {
             activeProfile={activeProfile}
             connectedAt={connectedAt}
             latencyMs={latencyMs}
-            selectedPing={activeProfileId ? pings[activeProfileId] : undefined}
+            selectedPing={activeProfileId ? pingMs(pings[activeProfileId]) : undefined}
             traffic={traffic}
             notice={toast}
           />

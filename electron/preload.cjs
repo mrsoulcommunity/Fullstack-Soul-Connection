@@ -39,8 +39,19 @@ contextBridge.exposeInMainWorld('soul', {
   copyImage: (dataUrl) => ipcRenderer.invoke('app:copyImage', dataUrl),
 
   openProxyFolder: () => ipcRenderer.invoke('app:openProxyFolder'),
-  systemProxyEnable: () => ipcRenderer.invoke('systemProxy:enable'),
-  systemProxyDisable: () => ipcRenderer.invoke('systemProxy:disable'),
+
+  // ---- System proxy ----
+  // Intent in, verified status out. There is deliberately no "enable"/"disable"
+  // pair any more: the renderer states what the user wants and the main process
+  // reconciles that against what Windows actually has.
+  systemProxySetDesired: (desired) => ipcRenderer.invoke('systemProxy:setDesired', desired),
+  systemProxyGet: () => ipcRenderer.invoke('systemProxy:get'),
+  systemProxySync: () => ipcRenderer.invoke('systemProxy:sync'),
+  onSystemProxyStatus: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('system-proxy-status', handler);
+    return () => ipcRenderer.removeListener('system-proxy-status', handler);
+  },
   testProxyConnection: (protocol) => ipcRenderer.invoke('network:testConnection', { protocol }),
   resetNetworkDefaults: () => ipcRenderer.invoke('network:resetDefaults'),
   getRecentProxyLogs: () => ipcRenderer.invoke('network:getRecentLogs'),
@@ -56,6 +67,15 @@ contextBridge.exposeInMainWorld('soul', {
   disconnect: () => ipcRenderer.invoke('connection:disconnect'),
   status: () => ipcRenderer.invoke('connection:status'),
   pingTest: (profileId) => ipcRenderer.invoke('ping:test', profileId),
+
+  // ---- Tunnel status (public exit IP) ----
+  tunnelGet: () => ipcRenderer.invoke('tunnel:get'),
+  tunnelRefresh: () => ipcRenderer.invoke('tunnel:refresh'),
+  onTunnelStatus: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('tunnel-status', handler);
+    return () => ipcRenderer.removeListener('tunnel-status', handler);
+  },
 
   testPing: (profileId, token) => ipcRenderer.invoke('test:ping', { profileId, token }),
   testReal: (profileId, token) => ipcRenderer.invoke('test:real', { profileId, token }),

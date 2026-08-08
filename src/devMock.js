@@ -84,7 +84,12 @@ function mockNormalizeRule(input, existing) {
 
 export function installDevMock() {
   let settings = { ...DEFAULT_SETTINGS };
-  let systemProxyEnabled = false;
+  // Mirrors the real controller's split: persisted intent vs what the "system"
+  // actually has. `spActive` is only ever true when a tunnel is up, which is
+  // what makes the pending state visible while developing in a browser.
+  let spDesired = false;
+  let spActive = false;
+  let spError = null;
   let state = {
     activeProfileId: 'p1',
     connectionMode: 'proxy',
@@ -93,7 +98,7 @@ export function installDevMock() {
     killSwitchBlocking: false,
   };
   let killSwitchArmed = false;
-  const listeners = { state: [], latency: [], traffic: [], profiles: [], settings: [], updater: [], test: [], proxyLog: [], soul: [], routing: [], health: [], failover: [] };
+  const listeners = { state: [], latency: [], traffic: [], profiles: [], settings: [], updater: [], test: [], proxyLog: [], soul: [], routing: [], health: [], failover: [], tunnel: [], systemProxy: [] };
 
   // Smart Routing / health / failover, mocked well enough to drive the whole
   // screen: rules round-trip through the same normalization shape the main
@@ -157,9 +162,36 @@ export function installDevMock() {
   let latencyTimer = null;
   let sessionTotal = 0;
 
-  const emitState = () => listeners.state.forEach((fn) => fn({
-    ...state, systemProxyEnabled, soulModeEnabled, activeSoulProfile,
-  }));
+  // Reconciles intent against the (mock) machine exactly as the real
+  // SystemProxyController does, so the UI's pending/active distinction is
+  // exercised in the browser too.
+  const spReconcile = () => {
+    spActive = spDesired && state.connectionState === 'connected';
+    return spStatus();
+  };
+  const spStatus = () => ({
+    desired: spDesired,
+    active: spActive,
+    pending: spDesired && !spActive,
+    host: spActive ? '127.0.0.1' : null,
+    port: spActive ? settings.httpPort : null,
+    server: spActive ? `http=127.0.0.1:${settings.httpPort};https=127.0.0.1:${settings.httpPort}` : '',
+    pac: null,
+    foreign: false,
+    readable: true,
+    tunnelUp: state.connectionState === 'connected',
+    lastError: spError,
+    checkedAt: Date.now(),
+  });
+  const emitSystemProxy = () => listeners.systemProxy.forEach((fn) => fn(spStatus()));
+
+  const emitState = () => {
+    spReconcile();
+    listeners.state.forEach((fn) => fn({
+      ...state, systemProxy: spStatus(), soulModeEnabled, activeSoulProfile,
+    }));
+    emitSystemProxy();
+  };
   const emitSoul = (payload) => listeners.soul.forEach((fn) => fn(payload));
   const emitUpdater = (payload) => listeners.updater.forEach((fn) => fn(payload));
 
@@ -207,11 +239,54 @@ export function installDevMock() {
     }, 1800);
   }
 
+  // ---- Tunnel status ----
+  // Mirrors the real sequence (probing -> ok, then periodic re-checks) so the
+  // panel's skeleton, pulse and "checked N seconds ago" can all be seen in a
+  // plain browser. The real thing measures this from outside the machine.
+  const MOCK_EXITS = [
+    { ip: '185.199.108.153', countryCode: 'DE', city: 'Frankfurt', isp: 'Hetzner Online GmbH', source: 'ip-api.com' },
+    { ip: '45.87.212.19', countryCode: 'NL', city: 'Amsterdam', isp: 'Serverius Holding B.V.', source: 'ip-api.com' },
+    { ip: '141.98.118.70', countryCode: 'FI', city: 'Helsinki', isp: 'Hetzner Online GmbH', source: 'ipinfo.io' },
+  ];
+  const MOCK_BASELINE_IP = '2.178.44.91';
+  let tunnelStatus = { phase: 'idle' };
+  let tunnelTimer = null;
+  const emitTunnel = () => listeners.tunnel.forEach((fn) => fn(tunnelStatus));
+  const setTunnel = (patch) => { tunnelStatus = { ...tunnelStatus, ...patch }; emitTunnel(); };
+
+  async function probeTunnel() {
+    setTunnel({ phase: tunnelStatus.ip ? 'refreshing' : 'probing', message: null });
+    await new Promise((r) => setTimeout(r, rnd(700, 1600)));
+    if (state.connectionState !== 'connected') return tunnelStatus;
+    const exit = MOCK_EXITS[Math.floor(Math.random() * MOCK_EXITS.length)];
+    setTunnel({
+      phase: 'ok', ...exit, family: 4, country: null, asn: null,
+      checkedAt: Date.now(), baselineIp: MOCK_BASELINE_IP, matchesServer: false, message: null,
+    });
+    return tunnelStatus;
+  }
+
+  function startTunnel() {
+    clearInterval(tunnelTimer);
+    probeTunnel();
+    tunnelTimer = setInterval(probeTunnel, 20000);
+  }
+
+  function stopTunnel() {
+    clearInterval(tunnelTimer);
+    tunnelTimer = null;
+    setTunnel({
+      phase: 'idle', ip: null, city: null, countryCode: null, isp: null,
+      source: null, checkedAt: null, message: null, matchesServer: false,
+    });
+  }
+
   function stopTelemetry() {
     clearInterval(trafficTimer);
     clearInterval(latencyTimer);
     clearInterval(proxyLogTimer);
     clearInterval(healthTimer);
+    stopTunnel();
     healthTimer = null;
     health = { active: { latency: null, jitter: null, loss: null, score: null, total: 0, samples: [] }, backup: [] };
   }
@@ -245,7 +320,7 @@ export function installDevMock() {
     listProfiles: async () => ({
       profiles, subscriptions, ...state,
       settings,
-      systemProxyEnabled,
+      systemProxy: spStatus(),
       soulModeEnabled,
       soulCount: SOUL_COUNT,
       activeSoulProfile,
@@ -343,6 +418,7 @@ export function installDevMock() {
       state = { ...state, activeProfileId: winner.id, connectionState: 'connected', connectedAt: Date.now() };
       emitState();
       startTelemetry();
+      startTunnel();
       startHealth();
       return { connectionState: state.connectionState, profile: { id: winner.id, name: winner.name }, score: 78 };
     },
@@ -369,6 +445,7 @@ export function installDevMock() {
       }
       emitState();
       startTelemetry();
+      startTunnel();
       startHealth();
     },
     disconnect: async () => {
@@ -376,9 +453,10 @@ export function installDevMock() {
       emitState();
       await new Promise((r) => setTimeout(r, 700));
       stopTelemetry();
-      // Mirrors the real app's disconnect-time safety net: a dead local
-      // proxy left as the active system proxy would break the user's internet.
-      systemProxyEnabled = false;
+      // Mirrors the real controller: the proxy comes off the machine because
+      // its port is about to die, but the user's INTENT survives -- so the next
+      // connect puts it straight back instead of silently resetting the toggle.
+      spActive = false;
       state = { ...state, connectionState: 'disconnected', connectedAt: null };
       // Mirrors the real Kill Switch: any disconnect while armed blocks traffic.
       if (killSwitchArmed && settings.killSwitchEnabled) {
@@ -387,11 +465,35 @@ export function installDevMock() {
       emitState();
     },
     setMode: async (mode) => { state = { ...state, connectionMode: mode }; },
-    pingTest: async () => {
-      await new Promise((r) => setTimeout(r, 300 + Math.random() * 900));
-      if (Math.random() < 0.15) throw new Error('timeout');
-      return { ms: 40 + Math.round(Math.random() * 500) };
+    // Same shape the real ping:test answers with: a median over real samples,
+    // plus the spread the tooltip reports. 'tunnel' when the profile is the one
+    // currently connected, exactly as main decides it.
+    pingTest: async (profileId) => {
+      await new Promise((r) => setTimeout(r, 500 + Math.random() * 900));
+      if (Math.random() < 0.12) return { profileId, ms: -1, loss: 100, method: 'tcp' };
+      const live = state.connectionState === 'connected' && state.activeProfileId === profileId;
+      const base = 30 + Math.random() * (live ? 90 : 320);
+      const samples = Array.from({ length: live ? 3 : 5 }, () => Math.round(base + rnd(-8, 22)));
+      const sorted = [...samples].sort((a, b) => a - b);
+      return {
+        profileId,
+        method: live ? 'tunnel' : 'tcp',
+        ms: sorted[Math.floor(sorted.length / 2)],
+        min: sorted[0],
+        max: sorted[sorted.length - 1],
+        avg: Math.round(samples.reduce((a, b) => a + b, 0) / samples.length),
+        jitter: Math.round(rnd(2, 18)),
+        loss: 0,
+        samples,
+      };
     },
+
+    tunnelGet: async () => ({ ...tunnelStatus, baselineIp: MOCK_BASELINE_IP }),
+    tunnelRefresh: async () => {
+      if (state.connectionState !== 'connected') return { ...tunnelStatus };
+      return probeTunnel();
+    },
+    onTunnelStatus: on('tunnel'),
     addLink: async () => { throw new Error('در حالت پیش‌نمایش در دسترس نیست'); },
     addSubscription: async () => { throw new Error('در حالت پیش‌نمایش در دسترس نیست'); },
     addCustomConfig: async (fields) => {
@@ -467,19 +569,25 @@ export function installDevMock() {
     openLogsFolder: () => {},
     openProxyFolder: () => {},
 
-    systemProxyEnable: async () => {
-      if (state.connectionState !== 'connected') throw new Error('اول باید پروکسی محلی را روشن کنی (به یک سرور وصل شو)');
+    systemProxySetDesired: async (desired) => {
+      await new Promise((r) => setTimeout(r, 200));
+      spDesired = !!desired;
+      spError = null;
+      emitState();
+      const st = spStatus();
+      if (st.desired && !st.active && !st.tunnelUp) {
+        return { ...st, note: 'ثبت شد — به‌محض اتصال به سرور، پروکسی سیستم اعمال می‌شود' };
+      }
+      return st;
+    },
+    systemProxyGet: async () => spStatus(),
+    systemProxySync: async () => {
       await new Promise((r) => setTimeout(r, 250));
-      systemProxyEnabled = true;
-      emitState();
-      return true;
+      spReconcile();
+      emitSystemProxy();
+      return spStatus();
     },
-    systemProxyDisable: async () => {
-      await new Promise((r) => setTimeout(r, 150));
-      systemProxyEnabled = false;
-      emitState();
-      return true;
-    },
+    onSystemProxyStatus: on('systemProxy'),
     testProxyConnection: async (protocol) => {
       if (state.connectionState !== 'connected') return { ok: false, reason: 'not-running', message: 'پروکسی محلی در حال اجرا نیست' };
       await new Promise((r) => setTimeout(r, 600 + Math.random() * 600));
@@ -636,6 +744,7 @@ export function installDevMock() {
         state = { ...state, activeProfileId: winner.id, connectionState: 'connected', connectedAt: Date.now() };
         emitState();
         startTelemetry();
+        startTunnel();
         emitSoul({ phase: 'done', server: winner.name, avg: 148, jitter: 12, loss: 0, tested: 4, alive: 27, total: SOUL_COUNT });
         return { connectionState: state.connectionState };
       } catch (err) {

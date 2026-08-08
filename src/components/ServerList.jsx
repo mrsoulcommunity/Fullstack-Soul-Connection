@@ -6,37 +6,50 @@ import QrModal from './QrModal.jsx';
 import SubTestModal from './SubTestModal.jsx';
 import * as engine from '../finder/testEngine.js';
 import { formatBytes, relativeTime, subUsageInfo } from '../utils/format.js';
-
-function pingClass(ms) {
-  if (ms === undefined) return 'na';
-  if (ms === 'measuring') return 'na';
-  if (ms === -1) return 'bad';
-  if (ms < 150) return 'good';
-  if (ms < 400) return 'mid';
-  return 'bad';
-}
-
-function pingLabel(ms) {
-  if (ms === undefined) return 'پینگ';
-  if (ms === 'measuring') return '…';
-  if (ms === -1) return 'خطا';
-  return `${ms}ms`;
-}
+import { isMeasuring, pingMs, pingTone, pingTitle, toneForMs } from '../utils/ping.js';
 
 function groupStats(items, pings) {
   const totalBytes = items.reduce((sum, p) => sum + (p.totalBytes || 0), 0);
-  const measured = items
-    .map((p) => pings[p.id])
-    .filter((v) => typeof v === 'number' && v > 0);
+  const measured = items.map((p) => pingMs(pings[p.id])).filter((v) => v != null && v >= 0);
   const bestPing = measured.length ? Math.min(...measured) : undefined;
   return { totalBytes, bestPing };
+}
+
+// The measured value, or the reason there isn't one. Deliberately terse: this
+// pill sits in a 296px sidebar next to a name that needs the room, and the full
+// breakdown (median / min / max / jitter / loss / method) lives in the tooltip.
+function PingPill({ entry, onClick }) {
+  const measuring = isMeasuring(entry);
+  const ms = pingMs(entry);
+  const failed = !!entry && entry.status === 'fail';
+
+  return (
+    <button
+      className={`ping ${pingTone(entry)} ${measuring ? 'measuring' : ''} ${entry?.method === 'tunnel' ? 'via-tunnel' : ''}`}
+      onClick={onClick}
+      title={pingTitle(entry)}
+      aria-busy={measuring || undefined}
+    >
+      {measuring && <span className="ping-dots" aria-hidden="true"><i /><i /><i /></span>}
+      {ms != null ? (
+        // Keyed on the measurement time so a fresh reading remounts and
+        // replays its entrance -- the row visibly confirms it just updated.
+        <span key={entry.at || 'v'} className="ping-num">
+          {ms}
+          <span className="ping-unit">ms</span>
+        </span>
+      ) : !measuring && (
+        <span className="ping-num">{failed ? '؟' : '—'}</span>
+      )}
+    </button>
+  );
 }
 
 // Memoized so a ping/traffic tick that changes one card's `ms` (or unrelated
 // App state) doesn't re-render every other card in a list that can run into
 // the hundreds. Relies on `onSelect`/`onDelete`/`onPing`/`onContextMenu` being
 // referentially stable (useCallback'd) across unrelated re-renders.
-const ServerCard = React.memo(function ServerCard({ profile, active, ms, onSelect, onRequestDelete, onPing, onContextMenu }) {
+const ServerCard = React.memo(function ServerCard({ profile, active, ping, onSelect, onRequestDelete, onPing, onContextMenu }) {
   return (
     <div className={`server-card ${active ? 'active' : ''}`} onContextMenu={(e) => onContextMenu(e, profile)}>
       <span className="proto-tag">{profile.protocol}</span>
@@ -50,9 +63,7 @@ const ServerCard = React.memo(function ServerCard({ profile, active, ms, onSelec
           {profile.totalBytes > 0 && <span className="usage-tag"> · {formatBytes(profile.totalBytes)}</span>}
         </div>
       </div>
-      <button className={`ping ${pingClass(ms)}`} onClick={() => onPing(profile.id)}>
-        {pingLabel(ms)}
-      </button>
+      <PingPill entry={ping} onClick={() => onPing(profile.id)} />
       <button className="del" onClick={() => onRequestDelete(profile)} title="حذف">
         <Icon name="close" size={13} />
       </button>
@@ -74,6 +85,7 @@ export default function ServerList({
   const [modal, setModal] = useState(null);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [testModal, setTestModal] = useState(null); // { sub, mode, autoConnectBest }
+  const [pingingAll, setPingingAll] = useState(false);
 
   // "Restore Previous Session" -- reports query/sortBy/collapsed up (debounced)
   // whenever they change, so App.jsx can persist them; a no-op when the
@@ -168,16 +180,35 @@ export default function ServerList({
       list = [...list].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     } else if (sortBy === 'ping') {
       list = [...list].sort((a, b) => {
-        const ma = pings[a.id]; const mb = pings[b.id];
-        const va = typeof ma === 'number' && ma > 0 ? ma : Infinity;
-        const vb = typeof mb === 'number' && mb > 0 ? mb : Infinity;
-        return va - vb;
+        // Unmeasured and unreachable both sink to the bottom rather than
+        // pretending to be fast.
+        const va = pingMs(pings[a.id]);
+        const vb = pingMs(pings[b.id]);
+        return (va == null ? Infinity : va) - (vb == null ? Infinity : vb);
       });
     }
     return list;
   }, [profiles, query, sortBy, pings]);
 
   const groups = useMemoGroups(filtered, subscriptions, pings);
+
+  // A real ping takes several samples per server, so a sweep over a large list
+  // is measurably long -- the toolbar button becomes the progress readout for
+  // it instead of sitting there looking idle.
+  const measuringCount = useMemo(
+    () => filtered.reduce((n, p) => n + (isMeasuring(pings[p.id]) ? 1 : 0), 0),
+    [filtered, pings]
+  );
+
+  const runPingAll = useCallback(async () => {
+    if (pingingAll) return;
+    setPingingAll(true);
+    try {
+      await onPingAll(filtered.map((p) => p.id));
+    } finally {
+      setPingingAll(false);
+    }
+  }, [pingingAll, onPingAll, filtered]);
 
   if (!profiles.length) {
     return (
@@ -212,8 +243,15 @@ export default function ServerList({
           <option value="ping">پینگ</option>
           <option value="name">نام</option>
         </select>
-        <button className="icon-btn" title="پینگ همه" onClick={() => onPingAll(filtered.map((p) => p.id))}>
-          <Icon name="refresh" size={15} />
+        <button
+          className={`icon-btn ping-all ${pingingAll ? 'busy' : ''}`}
+          title={pingingAll ? `در حال اندازه‌گیری پینگ واقعی… (${measuringCount} سرور باقی مانده)` : 'اندازه‌گیری پینگ واقعی همه‌ی سرورها'}
+          onClick={runPingAll}
+          disabled={pingingAll}
+        >
+          {pingingAll
+            ? <span className="icon-spinner" aria-hidden="true" />
+            : <Icon name="gauge" size={15} />}
         </button>
       </div>
 
@@ -249,7 +287,10 @@ export default function ServerList({
                       {group.stats.totalBytes > 0 && (
                         <span className="stat-chip size">{formatBytes(group.stats.totalBytes)}</span>
                       )}
-                      <span className={`stat-chip ping ${pingClass(group.stats.bestPing)}`}>
+                      <span
+                        className={`stat-chip ping ${toneForMs(group.stats.bestPing ?? null)}`}
+                        title={group.stats.bestPing !== undefined ? 'بهترین پینگ اندازه‌گیری‌شده در این گروه' : 'هنوز پینگی گرفته نشده'}
+                      >
                         {group.stats.bestPing !== undefined ? `${group.stats.bestPing}ms` : '—'}
                       </span>
                     </span>
@@ -308,7 +349,7 @@ export default function ServerList({
                 key={p.id}
                 profile={p}
                 active={p.id === activeProfileId}
-                ms={pings[p.id]}
+                ping={pings[p.id]}
                 onSelect={onSelect}
                 onRequestDelete={requestDeleteProfile}
                 onPing={onPing}

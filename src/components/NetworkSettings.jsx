@@ -42,9 +42,69 @@ function ProxyLogFeed({ logs }) {
   );
 }
 
+// The live system-proxy readout. Every line here comes from a fresh read of the
+// Windows registry in the main process -- intent and reality are shown
+// separately on purpose, because the whole class of bug this replaces was the
+// UI reporting one while the machine was in the other.
+function SystemProxyRow({ status, busy, onSetDesired, onSync }) {
+  const s = status || {};
+  const tone = s.active ? 'connected' : s.pending || s.lastError ? 'connecting' : '';
+
+  let hint;
+  if (s.lastError) {
+    hint = s.lastError;
+  } else if (s.active) {
+    hint = `فعال — ویندوز از ${s.host}:${s.port} استفاده می‌کند`;
+  } else if (s.foreign) {
+    hint = `پروکسی دیگری روی سیستم فعال است (${s.server || '—'}) — دست نخورده باقی می‌ماند`;
+  } else if (s.pending && !s.tunnelUp) {
+    hint = 'در انتظار اتصال — به‌محض وصل‌شدن به سرور، خودکار اعمال می‌شود';
+  } else if (s.pending) {
+    hint = 'در حال اعمال…';
+  } else {
+    hint = 'غیرفعال — ترافیک ویندوز از تونل عبور نمی‌کند';
+  }
+
+  return (
+    <div className="setting-row">
+      <div className="setting-text">
+        <span className="setting-label net-status-label">
+          <span className={`status-dot ${tone}`} />
+          پروکسی سیستم ویندوز
+          {s.active && <span className="net-verified" title="این وضعیت از رجیستری ویندوز خوانده شده است"><Icon name="check" size={11} /> تأییدشده</span>}
+        </span>
+        <span className={`setting-hint ${s.lastError ? 'error' : ''}`}>{hint}</span>
+        {s.pac && (
+          <span className="setting-hint error">
+            یک اسکریپت PAC روی ویندوز تنظیم شده و بر پروکسی دستی اولویت دارد
+          </span>
+        )}
+      </div>
+      <div className="net-btn-row">
+        <button className="btn icon-inline-btn" onClick={onSync} disabled={busy} title="خواندن دوباره‌ی وضعیت واقعی از ویندوز">
+          <Icon name="refresh" size={13} /> بررسی
+        </button>
+        {/* The switch is intent. It stays where the user put it even with no
+            tunnel up -- the hint above explains what is actually happening. */}
+        <button
+          className={`switch ${s.desired ? 'on' : ''}`}
+          onClick={() => onSetDesired(!s.desired)}
+          disabled={busy}
+          role="switch"
+          aria-checked={!!s.desired}
+          aria-label="پروکسی سیستم ویندوز"
+          type="button"
+        >
+          <span className="knob" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function NetworkSettings({
-  settings, connectionState, systemProxyEnabled, killSwitchBlocking,
-  onUpdate, onUpdateChecked, onSystemProxyEnable, onSystemProxyDisable, onOpenProxyFolder, onResetNetworkDefaults,
+  settings, connectionState, systemProxy, killSwitchBlocking,
+  onUpdate, onUpdateChecked, onSystemProxySetDesired, onSystemProxySync, onOpenProxyFolder, onResetNetworkDefaults,
 }) {
   const [proto, setProto] = useState('socks');
   const [testState, setTestState] = useState({ socks: { status: 'idle' }, http: { status: 'idle' } });
@@ -86,13 +146,13 @@ export default function NetworkSettings({
     });
   }
 
-  async function handleSystemProxyEnable() {
+  async function handleSetDesired(v) {
     setBusy(true);
-    try { await onSystemProxyEnable(); } finally { setBusy(false); }
+    try { await onSystemProxySetDesired(v); } finally { setBusy(false); }
   }
-  async function handleSystemProxyDisable() {
+  async function handleSync() {
     setBusy(true);
-    try { await onSystemProxyDisable(); } finally { setBusy(false); }
+    try { await onSystemProxySync(); } finally { setBusy(false); }
   }
 
   const prefix = proto === 'socks' ? 'socks' : 'http';
@@ -135,23 +195,12 @@ export default function NetworkSettings({
             <span className="setting-hint">{localProxyRunning ? 'در حال اجرا' : 'متوقف — برای اجرا به یک سرور وصل شو'}</span>
           </div>
         </div>
-        <div className="setting-row">
-          <div className="setting-text">
-            <span className="setting-label net-status-label">
-              <span className={`status-dot ${systemProxyEnabled ? 'connected' : ''}`} />
-              پروکسی سیستم ویندوز
-            </span>
-            <span className="setting-hint">{systemProxyEnabled ? 'فعال — ویندوز از پروکسی محلی استفاده می‌کند' : 'غیرفعال'}</span>
-          </div>
-          <div className="net-btn-row">
-            <button className="btn icon-inline-btn" disabled={!localProxyRunning || systemProxyEnabled || busy} onClick={handleSystemProxyEnable}>
-              <Icon name="power" size={13} /> تنظیم پروکسی سیستم
-            </button>
-            <button className="btn icon-inline-btn" disabled={!systemProxyEnabled || busy} onClick={handleSystemProxyDisable}>
-              <Icon name="stop" size={13} /> بازنشانی
-            </button>
-          </div>
-        </div>
+        <SystemProxyRow
+          status={systemProxy}
+          busy={busy}
+          onSetDesired={handleSetDesired}
+          onSync={handleSync}
+        />
       </Section>
 
       <Section title="پروکسی محلی — تنظیم دستی" icon="wifi" description="آدرس، پورت و احراز هویت اختیاری برای SOCKS5 و HTTP">
