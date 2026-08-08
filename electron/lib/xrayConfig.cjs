@@ -1,4 +1,12 @@
 'use strict';
+const net = require('net');
+
+// A bare IP needs no DNS entry and is matched by an `ip` rule rather than a
+// `domain` one -- the distinction decides how the server gets pinned outside
+// the tunnel in tunnel mode.
+function isIpLiteral(address) {
+  return net.isIP(String(address || '').replace(/^\[|\]$/g, '')) !== 0;
+}
 
 function streamSettings(p) {
   const s = { network: p.network || 'tcp' };
@@ -160,28 +168,45 @@ function buildXrayConfig(profile, opts = {}) {
     },
   ];
 
-  if (mode === 'tun') {
-    inbounds.push({
-      tag: 'tun-in',
-      protocol: 'tun',
-      settings: {
-        name: 'soulconnection-tun',
-        mtu: 1500,
-        gateway: ['10.90.90.1/24'],
-        dns: ['1.1.1.1'],
-        autoSystemRoutingTable: ['0.0.0.0/0'],
-        autoOutboundsInterface: 'auto',
-      },
-      sniffing: { enabled: true, destOverride: ['http', 'tls'] },
-    });
-  }
+  if (mode === 'tun') inbounds.push(tunInbound());
 
   return assemble(profile, opts, inbounds);
+}
+
+// Tunnel-mode constants. The address plan is arbitrary but must agree with what
+// tunNetwork.cjs configures on the adapter, so both read it from here.
+const TUN_NAME = 'soulconnection-tun';
+const TUN_MTU = 1500;
+const TUN_ADDRESS = '10.90.90.2';
+const TUN_GATEWAY = '10.90.90.1';
+const TUN_PREFIX = 24;
+const TUN_DNS = ['1.1.1.1', '8.8.8.8'];
+
+// xray.proxy.tun.Config has exactly three fields -- name, MTU, user_level --
+// confirmed against the protobuf descriptor embedded in the shipped binary.
+// The previous config also passed `gateway`, `dns`, `autoSystemRoutingTable`
+// and `autoOutboundsInterface`; none of those exist, and xray accepts unknown
+// setting keys without complaint, so they were silently discarded. That is why
+// Tunnel Mode produced an adapter with no address and no routes, which Windows
+// had no reason to send traffic to. Address/route/DNS setup lives in
+// lib/tunNetwork.cjs, where the OS actually accepts it.
+//
+// Sniffing is not optional here: traffic arrives as raw IP packets addressed to
+// an IP, so without recovering the hostname from the HTTP/TLS handshake, domain
+// routing rules would have nothing to match on.
+function tunInbound() {
+  return {
+    tag: 'tun-in',
+    protocol: 'tun',
+    settings: { name: TUN_NAME, MTU: TUN_MTU },
+    sniffing: { enabled: true, destOverride: ['http', 'tls', 'quic'], routeOnly: false },
+  };
 }
 
 // Everything both layouts share: the three outbounds, the routing rule list
 // Smart Routing compiled for us, and the optional stats API.
 function assemble(profile, opts, inbounds) {
+  const tunMode = opts.mode === 'tun';
   const outbounds = [
     { ...buildOutbound(profile), tag: 'proxy' },
     { protocol: 'freedom', tag: 'direct', settings: {} },
@@ -199,10 +224,80 @@ function assemble(profile, opts, inbounds) {
     inbounds,
     outbounds,
     routing: {
-      domainStrategy: 'AsIs',
+      // In tunnel mode connections arrive already resolved to an IP, so geosite
+      // rules would never match on their own. IPIfNonMatch lets a domain rule
+      // still be decided by resolving it, with sniffing recovering the hostname
+      // for anything that speaks HTTP or TLS.
+      domainStrategy: tunMode ? 'IPIfNonMatch' : 'AsIs',
       rules: routingRules,
     },
   };
+
+  if (tunMode) {
+    // ---- DNS, and why it has to work this way ----
+    //
+    // Windows hands apps the tunnel adapter's DNS server, so every lookup
+    // arrives as a UDP:53 packet inside the tunnel. Sending that to the proxy
+    // outbound makes name resolution depend on the server relaying UDP, which
+    // plenty of servers (and plenty of CDN-fronted WebSocket setups) simply do
+    // not do -- and when it fails, *nothing* resolves and every app looks
+    // broken while TCP through the tunnel is perfectly healthy.
+    //
+    // The `dns` outbound removes that dependency: it intercepts those queries
+    // and re-issues them through xray's own resolver over DoH, which is
+    // ordinary TCP and rides any transport. Apps still think they are talking
+    // to 1.1.1.1 over UDP.
+    outbounds.push({ protocol: 'dns', tag: 'dns-out', settings: { nonIPQuery: 'drop' } });
+
+    const servers = ['https://1.1.1.1/dns-query', 'https://8.8.8.8/dns-query'];
+    // The server's own hostname is the one name that cannot be resolved through
+    // the tunnel -- the tunnel does not exist yet. Give it a plain resolver,
+    // pinned direct by the routing rule added below.
+    if (profile && profile.address && !isIpLiteral(profile.address)) {
+      servers.unshift({
+        address: '1.1.1.1',
+        domains: [`full:${profile.address}`],
+        skipFallback: true,
+      });
+    }
+    config.dns = {
+      servers,
+      // AAAA answers are withheld: only 0.0.0.0/1 and 128.0.0.0/1 are captured,
+      // so any IPv6 an app obtained would leave the machine outside the tunnel.
+      queryStrategy: 'UseIPv4',
+      disableCache: false,
+    };
+
+    // Order is load-bearing; these go in front of every user rule.
+    const front = [
+      // Hijack DNS before anything else can claim it.
+      { type: 'field', inboundTag: ['tun-in'], port: 53, outboundTag: 'dns-out' },
+    ];
+    // Keep xray's own connection to the server outside the tunnel it is
+    // building. tunNetwork.cjs pins the same address with a host route; this is
+    // the matching half inside xray, and covers the case where the pin-route
+    // could not be installed.
+    if (profile && profile.address) {
+      front.push({
+        type: 'field',
+        [isIpLiteral(profile.address) ? 'ip' : 'domain']:
+          [isIpLiteral(profile.address) ? profile.address : `full:${profile.address}`],
+        outboundTag: 'direct',
+      });
+    }
+    // QUIC is UDP-only. If the transport cannot carry UDP the browser stalls on
+    // it before falling back; refusing it outright makes that fallback instant.
+    front.push({ type: 'field', network: 'udp', port: 443, outboundTag: 'block' });
+    // The machine's own LAN has to stay reachable (router, printers, NAS).
+    // The compiled rule set usually carries this already; only add it when it
+    // doesn't, so the list stays readable in the logs.
+    const hasPrivateRule = routingRules.some(
+      (r) => Array.isArray(r.ip) && r.ip.includes('geoip:private') && r.outboundTag === 'direct'
+    );
+    if (!hasPrivateRule) front.push({ type: 'field', ip: ['geoip:private'], outboundTag: 'direct' });
+
+    routingRules.unshift(...front);
+  }
 
   // Traffic stats: exposes a local gRPC StatsService that statsApi.cjs polls
   // for live upload/download counters on the 'proxy' outbound.
@@ -247,26 +342,22 @@ function buildDispatchConfig(profile, opts) {
     { tag: 'smart-direct-http', listen: '127.0.0.1', port: p.directHttp, protocol: 'http', settings: httpSettings, sniffing },
   ];
 
-  if (opts.mode === 'tun') {
-    // Tunnel mode never passes through the dispatcher (there is no local
-    // listener in the path), so its traffic follows the compiled domain rules
-    // exactly as it does with the dispatcher off.
-    inbounds.push({
-      tag: 'tun-in',
-      protocol: 'tun',
-      settings: {
-        name: 'soulconnection-tun',
-        mtu: 1500,
-        gateway: ['10.90.90.1/24'],
-        dns: ['1.1.1.1'],
-        autoSystemRoutingTable: ['0.0.0.0/0'],
-        autoOutboundsInterface: 'auto',
-      },
-      sniffing,
-    });
-  }
+  // Tunnel mode never passes through the dispatcher (there is no local listener
+  // in the path), so its traffic follows the compiled domain rules exactly as it
+  // does with the dispatcher off.
+  if (opts.mode === 'tun') inbounds.push(tunInbound());
 
   return assemble(profile, opts, inbounds);
 }
 
-module.exports = { buildXrayConfig };
+// The address plan is shared with tunNetwork.cjs, which has to configure the
+// adapter to match what the inbound was told to create.
+module.exports = {
+  buildXrayConfig,
+  TUN_NAME,
+  TUN_MTU,
+  TUN_ADDRESS,
+  TUN_GATEWAY,
+  TUN_PREFIX,
+  TUN_DNS,
+};

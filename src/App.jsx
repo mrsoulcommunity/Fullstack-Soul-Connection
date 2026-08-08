@@ -940,6 +940,7 @@ export default function App() {
               <RoutingRules
                 routing={routing}
                 connectionState={connectionState}
+                connectionMode={connectionMode}
                 needsReconnect={routingNeedsReconnect}
                 onSetMode={handleSetRoutingMode}
                 onSetLanDirect={handleSetLanDirect}

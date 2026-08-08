@@ -13,7 +13,10 @@ const fs = require('fs');
 app.commandLine.appendSwitch('high-dpi-support', '1');
 
 const { parseLink, parseMany, newId, parseSubscriptionUserinfo, buildCustomProfile } = require('./lib/parsers.cjs');
-const { buildXrayConfig } = require('./lib/xrayConfig.cjs');
+const {
+  buildXrayConfig, TUN_NAME, TUN_ADDRESS, TUN_GATEWAY, TUN_PREFIX, TUN_DNS,
+} = require('./lib/xrayConfig.cjs');
+const { TunNetwork } = require('./lib/tunNetwork.cjs');
 const { XrayProcess } = require('./lib/xrayProcess.cjs');
 // systemProxy.cjs itself is reached only through the controller -- main never
 // writes the registry directly any more.
@@ -181,6 +184,12 @@ let sessionTraffic = { uplink: 0, downlink: 0 };
 let subAutoUpdateTimer = null;
 let connectedAt = null;
 let currentPorts = null; // { socksPort, httpPort, apiPort, probeHttpPort } of the live session
+
+// Tunnel Mode's OS half: the adapter xray creates is inert until something
+// gives it an address and installs routes. See lib/tunNetwork.cjs.
+const tunNetwork = new TunNetwork({
+  log: (msg) => { if (process.env.SC_DEBUG) console.log(msg); },
+});
 
 // ---- Tunnel status (public exit IP) ----
 //
@@ -959,6 +968,21 @@ async function connect(profileId) {
       const p = profiles.find((x) => x.id === profileId);
       if (p) { p.lastUsedAt = Date.now(); store.set('profiles', profiles); }
     }
+    // Tunnel mode: xray has created the Wintun adapter, but Windows will not
+    // send it a single packet until it has an address and routes. Without this
+    // step the whole mode is a no-op -- apps set to "Direct" keep using the
+    // physical NIC, which is exactly how it behaved before.
+    if (mode === 'tun') {
+      await tunNetwork.apply({
+        adapterName: TUN_NAME,
+        address: TUN_ADDRESS,
+        prefixLength: TUN_PREFIX,
+        gateway: TUN_GATEWAY,
+        dnsServers: TUN_DNS,
+        serverAddress: profile.address,
+      });
+    }
+
     currentPorts = { socksPort, httpPort, apiPort, probeHttpPort };
     connectedAt = Date.now();
     reconnectAttempts = 0;
@@ -979,6 +1003,9 @@ async function connect(profileId) {
     currentPorts = null;
     connectedAt = null;
     await stopDispatcher();
+    // Routes must come out even when the failure happened after they went in,
+    // or the machine is left routing into an adapter that no longer exists.
+    await tunNetwork.teardown();
     // A half-built session may have left Windows pointed at a port that never
     // came up.
     await syncSystemProxy('connect-failed');
@@ -1038,6 +1065,9 @@ async function disconnect() {
   // a UI still showing "connected" over a dead tunnel.
   expectedExit = xray.isRunning;
   await stopDispatcher();
+  // Before xray goes away: once the adapter disappears, routes pointing into it
+  // are dead ends and the machine has no internet at all.
+  await tunNetwork.teardown();
   await xray.stop();
   connectionState = 'disconnected';
   persistSessionTraffic();
@@ -1062,8 +1092,10 @@ xray.on('exit', async () => {
   currentPorts = null;
   connectedAt = null;
   // The tunnel died under it -- the dispatcher would keep accepting
-  // connections and forwarding them into ports nothing is listening on.
+  // connections and forwarding them into ports nothing is listening on, and
+  // tunnel-mode routes would point into an adapter that no longer exists.
   await stopDispatcher();
+  await tunNetwork.teardown();
   // Before anything else: the listener Windows was pointed at is gone, so the
   // proxy has to come off or the user has no internet while we retry. Intent is
   // preserved, so a successful reconnect below re-applies it automatically.
@@ -1189,6 +1221,14 @@ app.whenReady().then(async () => {
   // state comes from this read of the registry, not from what we last believed.
   syncSystemProxy('startup');
 
+  // Same reasoning for Tunnel Mode: a crash or force-quit leaves the /1 routes
+  // in the table pointing at an adapter that died with the process, and the
+  // machine has no internet until they are removed. Matched strictly by the
+  // tunnel gateway address, so nothing else is ever touched.
+  TunNetwork.reconcileStale(TUN_GATEWAY)
+    .then((n) => { if (n && process.env.SC_DEBUG) console.log(`[tun] removed ${n} stale route(s)`); })
+    .catch(() => {});
+
   if (settings.runLocalProxyOnStartup) {
     const profileId = store.get('activeProfileId');
     if (profileId && findProfile(profileId)) {
@@ -1268,8 +1308,11 @@ app.on('will-quit', (e) => {
       // because a registry call hung is worse than a proxy left behind (which
       // the next launch reconciles anyway).
       await Promise.race([
-        systemProxyController.withdrawForShutdown(),
-        new Promise((r) => setTimeout(r, 4000)),
+        Promise.all([
+          systemProxyController.withdrawForShutdown(),
+          tunNetwork.teardown(),
+        ]),
+        new Promise((r) => setTimeout(r, 6000)),
       ]);
     } catch { /* fall through -- quitting must happen regardless */ } finally {
       try { store.flush(); } catch { /* ignore */ }

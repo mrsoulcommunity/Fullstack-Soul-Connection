@@ -239,7 +239,7 @@ function RunningApps({ appsState, onReload, routeOf, onPick, busyExe }) {
 }
 
 export default function RoutingRules({
-  routing, connectionState, onSetMode, onSetLanDirect,
+  routing, connectionState, connectionMode, onSetMode, onSetLanDirect,
   onSaveRule, onDeleteRule, onToggleRule, onAddDomains, onReconnect, needsReconnect,
 }) {
   const [editing, setEditing] = useState(null); // rule object, or 'new'
@@ -349,6 +349,20 @@ export default function RoutingRules({
           <Icon name="refresh" size={14} />
           <span>برای اعمال کامل این تغییر روی اتصال فعلی، یک‌بار قطع و دوباره وصل شو.</span>
           <button className="btn mini" onClick={onReconnect}>اتصال مجدد</button>
+        </div>
+      )}
+
+      {/* In Tunnel Mode traffic never passes through the local dispatcher, so
+          there is no connection to attribute to a process and the per-app rules
+          cannot be applied. Domain rules still are. Saying so beats letting the
+          user configure something that silently does nothing. */}
+      {mode === 'smart' && connectionMode === 'tun' && (
+        <div className="routing-notice">
+          <Icon name="info" size={14} />
+          <span>
+            در حالت «تانل کامل» فقط قوانین دامنه اعمال می‌شوند؛ قوانین مربوط به هر برنامه
+            نادیده گرفته می‌شوند. برای اعمال آن‌ها به حالت «پروکسی سیستم» برگرد.
+          </span>
         </div>
       )}
 
