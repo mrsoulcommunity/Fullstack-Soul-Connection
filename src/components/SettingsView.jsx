@@ -3,6 +3,7 @@ import Icon from './Icon.jsx';
 import { formatBytes } from '../utils/format.js';
 import { Section, Toggle } from './settingsPrimitives.jsx';
 import NetworkSettings from './NetworkSettings.jsx';
+import FailoverSettings from './FailoverSettings.jsx';
 
 const INTERVAL_OPTIONS = [
   { value: 0, label: 'خاموش' },
@@ -36,7 +37,7 @@ export default function SettingsView({
   onUpdate, onUpdateChecked, onOpenLogsFolder,
   onExportBackup, onImportBackup, onResetUsage, onResetAllUsage,
   onSystemProxyEnable, onSystemProxyDisable, onOpenProxyFolder, onResetNetworkDefaults,
-  killSwitchBlocking,
+  killSwitchBlocking, health, failover,
 }) {
   const portsLocked = connectionState !== 'disconnected';
   const totalUsage = (profiles || []).reduce((sum, p) => sum + (p.totalBytes || 0), 0);
@@ -110,6 +111,13 @@ export default function SettingsView({
         onSystemProxyDisable={onSystemProxyDisable}
         onOpenProxyFolder={onOpenProxyFolder}
         onResetNetworkDefaults={onResetNetworkDefaults}
+      />
+
+      <FailoverSettings
+        settings={settings}
+        health={health}
+        failover={failover}
+        onUpdate={onUpdate}
       />
 
       <Section title="مصرف داده" icon="database" description="میزان ترافیک مصرفی هر سرور">

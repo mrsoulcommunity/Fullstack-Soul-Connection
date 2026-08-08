@@ -29,10 +29,22 @@ const { isElevated, relaunchElevated } = require('./lib/elevation.cjs');
 const { StatsClient } = require('./lib/statsApi.cjs');
 const { initUpdater, checkForUpdates, downloadUpdate, downloadAndInstall, quitAndInstall } = require('./lib/updater.cjs');
 const { SoulPool } = require('./lib/soulPool.cjs');
+const routingRulesLib = require('./lib/routing/rules.cjs');
+const { compileRoutingRules } = require('./lib/routing/xrayRouting.cjs');
+const { Dispatcher } = require('./lib/routing/dispatcher.cjs');
+const { ProcessLookup } = require('./lib/routing/processLookup.cjs');
+const { AppList } = require('./lib/routing/appList.cjs');
+const { HealthMonitor } = require('./lib/health/monitor.cjs');
+const { FailoverController, FAILOVER_MODES, modeConfig } = require('./lib/health/failover.cjs');
+const { tcpOnlyScore } = require('./lib/health/score.cjs');
 
 const SOCKS_PORT = 10808;
 const HTTP_PORT = 10809;
 const API_PORT = 10810;
+// Private loopback ports xray listens on when the Smart Routing dispatcher
+// owns the public ones. Well clear of the user-configurable range so a custom
+// SOCKS/HTTP port can't collide with them.
+const DISPATCH_PORT_BASE = 20808;
 const LATENCY_POLL_MS = 15000;
 const TRAFFIC_POLL_MS = 1000;
 const MAX_RECONNECT_ATTEMPTS = 5;
@@ -56,6 +68,18 @@ const DEFAULT_SETTINGS = {
   httpUsername: '',
   httpPassword: '',
   customBypass: '', // extra semicolon-separated hosts/patterns added to the system-proxy bypass list
+
+  // ---- Smart Routing ----
+  // 'proxy' keeps the historical behaviour (everything through the tunnel),
+  // so an existing install is unaffected until the user opts in.
+  routingMode: 'proxy', // 'proxy' | 'direct' | 'smart'
+  lanDirect: true,      // localhost / private networks never go through the tunnel
+
+  // ---- Smart server selection & failover ----
+  autoSelectBestServer: false,
+  failoverEnabled: true,
+  failoverMode: 'balanced', // 'conservative' | 'balanced' | 'fast'
+  backupMonitoring: true,
 };
 
 // True portable mode: electron-builder's portable Windows target sets
@@ -138,7 +162,212 @@ let statsClient = null;
 let sessionTraffic = { uplink: 0, downlink: 0 };
 let subAutoUpdateTimer = null;
 let connectedAt = null;
-let currentPorts = null; // { socksPort, httpPort, apiPort } of the live session
+let currentPorts = null; // { socksPort, httpPort, apiPort, probeHttpPort } of the live session
+
+// ---- Smart Routing ----
+//
+// The rule list lives under its own store key rather than inside `settings`:
+// it is a growing collection the user edits item by item, not a flat set of
+// preferences, and settings:update's whitelist/type validation has nothing
+// useful to say about it.
+//
+// `routingCache` is the compiled, validated policy the dispatcher consults on
+// every single connection. Re-sanitizing the raw list per connection would put
+// avoidable work on the hot path, so it is rebuilt only when something changes.
+const processLookup = new ProcessLookup();
+// Enumerating running programs for the rule picker. Separate from
+// processLookup: that one answers "who owns this connection" thousands of times
+// per session, this one answers "what is running" when a dialog opens.
+const appList = new AppList();
+let dispatcher = null;
+let dispatcherActive = false;
+let routingCache = null;
+
+function getRoutingRules() {
+  return routingRulesLib.sanitizeRules(store.get('routingRules', []));
+}
+
+function routingPolicy() {
+  if (!routingCache) {
+    const s = getSettings();
+    routingCache = {
+      mode: routingRulesLib.MODES.has(s.routingMode) ? s.routingMode : 'proxy',
+      lanDirect: s.lanDirect !== false,
+      rules: getRoutingRules(),
+    };
+  }
+  return routingCache;
+}
+
+function invalidateRoutingCache() {
+  routingCache = null;
+}
+
+// The compiled shape that xray actually runs. Used both to build the config and
+// to tell whether a rule edit needs a reconnect to take effect.
+function compiledRouting(policy, mode) {
+  const useDispatcher = routingRulesLib.needsDispatcher(policy.mode, policy.rules);
+  const rules = compileRoutingRules({ ...policy, dispatcher: useDispatcher });
+  // Tunnel-mode traffic never reaches the dispatcher (there is no local
+  // listener in its path), so it still needs the declarative rules appended
+  // after the dispatcher's inbound-tag rules.
+  if (useDispatcher && mode === 'tun') {
+    rules.push(...compileRoutingRules({ ...policy, dispatcher: false }));
+  }
+  return { useDispatcher, rules };
+}
+
+async function startDispatcher({ ports, settings }) {
+  await stopDispatcher();
+  dispatcher = new Dispatcher({
+    // Read through routingPolicy() rather than closing over a snapshot: edits
+    // to app rules then take effect on the next connection, with no reconnect.
+    resolveRoute: ({ exe, host, port }) => {
+      const policy = routingPolicy();
+      return routingRulesLib.matchRoute({ exe, host, port }, policy.rules, {
+        mode: policy.mode,
+        lanDirect: policy.lanDirect,
+      }).route;
+    },
+    lookupExe: (srcPort) => processLookup.exeForPort(srcPort),
+    targets: {
+      proxy: { socksPort: ports.dispatch.proxySocks, httpPort: ports.dispatch.proxyHttp },
+      direct: { socksPort: ports.dispatch.directSocks, httpPort: ports.dispatch.directHttp },
+    },
+    auth: { username: settings.socksUsername, password: settings.socksPassword },
+  });
+  await dispatcher.start({
+    socksHost: settings.socksHost,
+    socksPort: ports.socksPort,
+    httpHost: settings.httpHost,
+    httpPort: ports.httpPort,
+  });
+  dispatcherActive = true;
+}
+
+async function stopDispatcher() {
+  if (dispatcher) {
+    try { await dispatcher.stop(); } catch { /* best effort */ }
+    dispatcher = null;
+  }
+  dispatcherActive = false;
+  processLookup.clear();
+}
+
+// ---- Health monitoring & failover ----
+
+const healthMonitor = new HealthMonitor({
+  // Measures the tunnel, not the dispatcher: when the dispatcher is in front,
+  // probing the public port would route the probe through the very rules being
+  // measured (and could legitimately send it direct).
+  probeActive: () => {
+    if (connectionState !== 'connected' || !currentPorts) return -1;
+    const s = getSettings();
+    return proxyPing({
+      host: '127.0.0.1',
+      port: currentPorts.probeHttpPort,
+      username: s.httpUsername,
+      password: s.httpPassword,
+    });
+  },
+  probeTcp: (profile, opts) => serverTest.tcpPingStats(profile.address, profile.port, opts),
+  probeTunnel: (profile, { signal }) => serverTest.realPing(profile, {
+    xrayBin, xrayAssetDir, workRoot: xrayWorkDir, signal, warmCount: 2,
+  }),
+});
+
+// Who the failover engine is allowed to move to. A pool server falls back to
+// other pool servers; a user config prefers its own subscription group (same
+// provider, same credentials, most likely to actually work) and widens to the
+// whole list only when that group is too small to be useful.
+const MAX_FAILOVER_CANDIDATES = 40;
+function failoverCandidates() {
+  const activeId = store.get('activeProfileId');
+  if (!activeId) return [];
+  if (soulPool.find(activeId)) {
+    return soulPool.list().filter((p) => p.id !== activeId).slice(0, MAX_FAILOVER_CANDIDATES);
+  }
+  const active = store.get('profiles', []).find((p) => p.id === activeId);
+  if (!active) return [];
+  const profiles = store.get('profiles', []).filter((p) => p.id !== activeId);
+  const group = active.subId ? profiles.filter((p) => p.subId === active.subId) : [];
+  return (group.length >= 2 ? group : profiles).slice(0, MAX_FAILOVER_CANDIDATES);
+}
+
+const failover = new FailoverController({
+  monitor: healthMonitor,
+  getConfig: () => {
+    const s = getSettings();
+    return { enabled: !!s.failoverEnabled, mode: s.failoverMode };
+  },
+  getCurrentId: () => store.get('activeProfileId', null),
+});
+
+let healthSessionKey = null;
+
+function sendToWindow(channel, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload);
+}
+
+function updateHealthMonitoring() {
+  const s = getSettings();
+  const key = connectionState === 'connected' && currentPorts
+    ? `${store.get('activeProfileId')}:${connectedAt}`
+    : null;
+  if (key === healthSessionKey) return; // same live session -- don't reset the window
+  healthSessionKey = key;
+
+  if (!key) {
+    healthMonitor.stop();
+    failover.resetSession();
+    return;
+  }
+  failover.resetSession();
+  healthMonitor.startActive({ intervalMs: modeConfig(s.failoverMode).probeMs });
+  if (s.backupMonitoring && s.failoverEnabled) {
+    healthMonitor.startBackup({ getCandidates: failoverCandidates });
+  } else {
+    healthMonitor.stopBackup();
+  }
+}
+
+healthMonitor.on('active', (health) => sendToWindow('health-update', { active: health }));
+healthMonitor.on('backup', (backup) => sendToWindow('health-update', { backup }));
+failover.on('degrading', (e) => sendToWindow('failover-event', { phase: 'degrading', ...e }));
+failover.on('blocked', (e) => sendToWindow('failover-event', { phase: 'blocked', ...e }));
+
+const briefProfile = (p) => (p ? { id: p.id, name: p.name, address: p.address } : null);
+
+// The engine decided; performing the move is main's job, because every other
+// connection state transition already goes through here.
+failover.on('switch', async ({ candidate, reason, reasonText, candidateScore, currentScore }) => {
+  const from = findProfile(store.get('activeProfileId'));
+  sendToWindow('failover-event', {
+    phase: 'switching',
+    reason, reasonText,
+    from: briefProfile(from),
+    to: briefProfile(candidate),
+    fromScore: currentScore,
+    toScore: candidateScore,
+  });
+  try {
+    await serialize(() => connect(candidate.id));
+    if (store.get('systemProxyEnabled', false) && currentPorts) {
+      try {
+        const s = getSettings();
+        await systemProxy.enable(dialHost(s.httpHost), currentPorts.httpPort, systemProxy.buildBypass(s.customBypass));
+      } catch { /* the tunnel is up; the proxy resync is best effort */ }
+    }
+    const ev = failover.noteSwitchResult({ ok: true, fromProfile: from, toProfile: candidate, reason });
+    notify('تعویض خودکار سرور', `${reasonText} — به «${candidate.name}» منتقل شدی`);
+    sendToWindow('failover-event', { phase: 'done', ...ev, fromScore: currentScore, toScore: candidateScore });
+  } catch (err) {
+    const ev = failover.noteSwitchResult({
+      ok: false, fromProfile: from, toProfile: candidate, reason, message: err.message,
+    });
+    sendToWindow('failover-event', { phase: 'failed', ...ev });
+  }
+});
 
 // Serializes every external trigger of connect()/disconnect() (IPC, tray,
 // auto-reconnect, auto-connect-on-launch) so overlapping calls queue up
@@ -198,11 +427,14 @@ function sendState() {
       // The pool server we landed on, so the UI can name it without holding a
       // copy of the whole pool.
       activeSoulProfile: soulActiveProfile(),
+      routingMode: getSettings().routingMode,
+      dispatcherActive,
     });
   }
   updateTray();
   updateLatencyPolling();
   updateTrafficPolling();
+  updateHealthMonitoring();
 }
 
 function updateTray() {
@@ -284,9 +516,14 @@ function updateLatencyPolling() {
       // unauthenticated probe is rejected by xray locally with a 407 and never
       // leaves the machine -- which would report a ~1ms "tunnel latency".
       const settings = getSettings();
+      // probeHttpPort is the tunnel's own inbound: with Smart Routing's
+      // dispatcher in front, the public port is subject to the user's rules and
+      // could legitimately answer this probe over a direct connection, which
+      // would report a flattering number that has nothing to do with the tunnel.
+      const throughDispatcher = ports.probeHttpPort !== ports.httpPort;
       const ms = await proxyPing({
-        host: dialHost(settings.httpHost),
-        port: ports.httpPort,
+        host: throughDispatcher ? '127.0.0.1' : dialHost(settings.httpHost),
+        port: ports.probeHttpPort,
         username: settings.httpUsername,
         password: settings.httpPassword,
       });
@@ -499,16 +736,52 @@ async function connect(profileId) {
     const preferredHttp = settings.httpPort === socksPort ? settings.httpPort + 1 : settings.httpPort;
     const httpPort = await findFreePort(preferredHttp);
     const apiPort = await findFreePort(API_PORT === socksPort || API_PORT === httpPort ? httpPort + 1 : API_PORT);
-    const config = buildXrayConfig(profile, {
+
+    const policy = routingPolicy();
+    const { useDispatcher, rules: routingRules } = compiledRouting(policy, mode);
+
+    // With the dispatcher in front, xray moves off the public ports entirely
+    // and listens on four private loopback ports instead -- one pair per route.
+    const dispatch = useDispatcher ? {
+      proxySocks: await findFreePort(DISPATCH_PORT_BASE),
+      proxyHttp: await findFreePort(DISPATCH_PORT_BASE + 1),
+      directSocks: await findFreePort(DISPATCH_PORT_BASE + 2),
+      directHttp: await findFreePort(DISPATCH_PORT_BASE + 3),
+    } : null;
+
+    const baseOpts = {
       socksPort, httpPort, apiPort, mode, logLevel: settings.xrayLogLevel,
       socksHost: settings.socksHost, httpHost: settings.httpHost,
       socksAccounts: settings.socksUsername ? [{ user: settings.socksUsername, pass: settings.socksPassword || '' }] : undefined,
       httpAccounts: settings.httpUsername ? [{ user: settings.httpUsername, pass: settings.httpPassword || '' }] : undefined,
-    });
+      routingRules,
+    };
     // Connecting only starts the local proxy (xray) -- System Proxy is a fully
     // separate, user-controlled toggle (see systemProxy:enable/disable below)
     // so flipping it on/off never restarts the tunnel.
-    await xray.start(config);
+    await xray.start(buildXrayConfig(profile, dispatch ? { ...baseOpts, dispatchPorts: dispatch } : baseOpts));
+
+    let probeHttpPort = httpPort;
+    if (dispatch) {
+      try {
+        await startDispatcher({ ports: { socksPort, httpPort, dispatch }, settings });
+        probeHttpPort = dispatch.proxyHttp;
+      } catch (err) {
+        // The public ports are what the rest of the machine talks to, so a
+        // dispatcher that can't bind them would leave the user with a running
+        // tunnel nobody can reach. Fall back to the plain layout -- domain
+        // rules still apply, only the per-app ones are lost -- and say so
+        // rather than silently degrading.
+        await stopDispatcher();
+        await xray.stop();
+        expectedExit = false;
+        await xray.start(buildXrayConfig(profile, {
+          ...baseOpts,
+          routingRules: compileRoutingRules({ ...policy, dispatcher: false }),
+        }));
+        notify('قوانین مسیریابی', `مسیریاب برنامه‌ها اجرا نشد (${err.message}). فعلاً فقط قوانین دامنه اعمال می‌شود.`);
+      }
+    }
     store.set('activeProfileId', profileId);
     store.set('activeMode', mode);
     {
@@ -517,7 +790,7 @@ async function connect(profileId) {
       const p = profiles.find((x) => x.id === profileId);
       if (p) { p.lastUsedAt = Date.now(); store.set('profiles', profiles); }
     }
-    currentPorts = { socksPort, httpPort, apiPort };
+    currentPorts = { socksPort, httpPort, apiPort, probeHttpPort };
     connectedAt = Date.now();
     reconnectAttempts = 0;
     connectionState = 'connected';
@@ -531,6 +804,7 @@ async function connect(profileId) {
     connectionState = 'disconnected';
     currentPorts = null;
     connectedAt = null;
+    await stopDispatcher();
     sendState();
     if (mode === 'tun' && /access is denied/i.test(err.message || '')) {
       throw new Error('حالت تانل نیاز به اجرای برنامه با دسترسی مدیر (Administrator) دارد');
@@ -639,6 +913,7 @@ async function disconnect() {
   // genuine crash then gets swallowed as "expected" -- no auto-reconnect, and
   // a UI still showing "connected" over a dead tunnel.
   expectedExit = xray.isRunning;
+  await stopDispatcher();
   await xray.stop();
   connectionState = 'disconnected';
   persistSessionTraffic();
@@ -662,6 +937,9 @@ xray.on('exit', async () => {
   persistSessionTraffic();
   currentPorts = null;
   connectedAt = null;
+  // The tunnel died under it -- the dispatcher would keep accepting
+  // connections and forwarding them into ports nothing is listening on.
+  await stopDispatcher();
   sendState();
 
   const killSwitchSettings = getSettings();
@@ -880,6 +1158,9 @@ ipcMain.handle('profiles:list', () => ({
   soulModeEnabled: store.get('soulModeEnabled', false),
   soulCount: soulPool.list().length,
   activeSoulProfile: soulActiveProfile(),
+  routing: routingState(),
+  health: { active: healthMonitor.activeHealth(), backup: healthMonitor.backupSnapshot() },
+  failover: failover.snapshot(),
 }));
 
 ipcMain.handle('settings:setMode', async (_e, mode) => {
@@ -1288,6 +1569,7 @@ const LOG_LEVELS = new Set(['none', 'error', 'warning', 'info', 'debug']);
 const BOOLEAN_SETTINGS = new Set([
   'launchOnStartup', 'runLocalProxyOnStartup', 'startMinimized', 'restorePreviousSession',
   'minimizeToTray', 'autoReconnect', 'killSwitchEnabled',
+  'lanDirect', 'autoSelectBestServer', 'failoverEnabled', 'backupMonitoring',
 ]);
 const PORT_SETTINGS = new Set(['socksPort', 'httpPort']);
 const HOST_SETTINGS = new Set(['socksHost', 'httpHost']);
@@ -1316,6 +1598,10 @@ ipcMain.handle('settings:update', async (_e, patch) => {
       if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) continue;
     } else if (key === 'xrayLogLevel') {
       if (!LOG_LEVELS.has(value)) continue;
+    } else if (key === 'routingMode') {
+      if (!routingRulesLib.MODES.has(value)) continue;
+    } else if (key === 'failoverMode') {
+      if (!FAILOVER_MODES[value]) continue;
     } else if (PORT_SETTINGS.has(key)) {
       if (!isValidPort(value)) continue;
     } else if (HOST_SETTINGS.has(key)) {
@@ -1364,6 +1650,16 @@ ipcMain.handle('settings:update', async (_e, patch) => {
   }
   if ('subAutoUpdateInterval' in clean) {
     scheduleSubAutoUpdate();
+  }
+  if ('routingMode' in clean || 'lanDirect' in clean) {
+    invalidateRoutingCache();
+  }
+  // Probe cadence and backup monitoring are derived from these, and the health
+  // window's identity check would otherwise keep the old timers running until
+  // the next connect.
+  if ('failoverMode' in clean || 'failoverEnabled' in clean || 'backupMonitoring' in clean) {
+    healthSessionKey = null;
+    updateHealthMonitoring();
   }
   return settings;
 });
@@ -1514,3 +1810,177 @@ ipcMain.handle('app:importBackup', async () => {
   store.set('activeProfileId', null);
   return { canceled: false, profiles: data.profiles.length };
 });
+
+// ---- Smart Routing IPC ----
+
+function routingState() {
+  const policy = routingPolicy();
+  return {
+    mode: policy.mode,
+    lanDirect: policy.lanDirect,
+    rules: policy.rules,
+    dispatcherActive,
+    dispatcherNeeded: routingRulesLib.needsDispatcher(policy.mode, policy.rules),
+    stats: dispatcher ? { ...dispatcher.stats } : null,
+  };
+}
+
+// The exact set of rules xray is running right now, as a comparable string.
+// Only a change to *this* needs a reconnect: app rules live entirely in the
+// dispatcher, which reads the policy fresh on every connection, so editing
+// them takes effect immediately and silently.
+function routingSignature() {
+  const c = compiledRouting(routingPolicy(), store.get('connectionMode', 'proxy'));
+  return JSON.stringify([c.useDispatcher, c.rules]);
+}
+
+function applyRoutingChange(mutate) {
+  const live = connectionState === 'connected';
+  const before = live ? routingSignature() : null;
+  mutate();
+  invalidateRoutingCache();
+  const needsReconnect = live && before !== routingSignature();
+  const state = { ...routingState(), needsReconnect };
+  sendToWindow('routing-changed', state);
+  return state;
+}
+
+function writeRules(rules) {
+  if (rules.length > routingRulesLib.MAX_RULES) {
+    throw new Error(`حداکثر ${routingRulesLib.MAX_RULES} قانون می‌توانی داشته باشی`);
+  }
+  store.set('routingRules', rules);
+}
+
+ipcMain.handle('routing:get', () => routingState());
+
+// The running-programs list behind the rule picker. Errors are returned rather
+// than thrown: a picker that opens with an explanation and a manual text field
+// is useful, one that fails to open is not.
+ipcMain.handle('apps:list', async (_e, { force = false } = {}) => {
+  try {
+    const { apps, source, cached } = await appList.list({ force });
+    return { apps, source, cached };
+  } catch (err) {
+    return { apps: [], source: null, error: err.message || 'فهرست برنامه‌ها خوانده نشد' };
+  }
+});
+
+ipcMain.handle('routing:setMode', (_e, mode) => applyRoutingChange(() => {
+  if (!routingRulesLib.MODES.has(mode)) throw new Error('حالت مسیریابی نامعتبر است');
+  updateSettings({ routingMode: mode });
+}));
+
+ipcMain.handle('routing:setLanDirect', (_e, enabled) => applyRoutingChange(() => {
+  updateSettings({ lanDirect: !!enabled });
+}));
+
+// One handler for add and edit: a payload carrying an existing id replaces
+// that rule in place (keeping its position in the list), anything else is
+// appended. Validation and normalization live in rules.cjs, so a rule saved
+// here matches by exactly the same logic the dispatcher applies later.
+ipcMain.handle('routing:saveRule', (_e, payload) => applyRoutingChange(() => {
+  const rules = getRoutingRules();
+  const idx = payload?.id ? rules.findIndex((r) => r.id === payload.id) : -1;
+  const rule = routingRulesLib.normalizeRule(payload, idx >= 0 ? rules[idx] : null);
+  if (idx >= 0) rules[idx] = rule;
+  else rules.push(rule);
+  writeRules(rules);
+}));
+
+ipcMain.handle('routing:deleteRule', (_e, id) => applyRoutingChange(() => {
+  writeRules(getRoutingRules().filter((r) => r.id !== id));
+}));
+
+ipcMain.handle('routing:toggleRule', (_e, { id, enabled }) => applyRoutingChange(() => {
+  const rules = getRoutingRules();
+  const rule = rules.find((r) => r.id === id);
+  if (rule) rule.enabled = !!enabled;
+  writeRules(rules);
+}));
+
+// Bulk entry: a pasted list of domains, one route for all of them. Separators
+// are whatever the user happened to use -- commas, semicolons, newlines,
+// spaces -- because this field exists precisely so nobody has to add fifteen
+// domains one dialog at a time.
+ipcMain.handle('routing:addDomains', (_e, { domains, route, exe, appName }) => applyRoutingChange(() => {
+  const parts = String(domains || '').split(/[\s,;]+/).map((d) => d.trim()).filter(Boolean);
+  if (!parts.length) throw new Error('هیچ دامنه‌ای وارد نشده است');
+  const rules = getRoutingRules();
+  const seen = new Set(rules.map((r) => `${r.exe}|${r.domain}`));
+  let added = 0;
+  for (const domain of parts) {
+    const rule = routingRulesLib.normalizeRule({ domain, route, exe, appName });
+    const key = `${rule.exe}|${rule.domain}`;
+    if (seen.has(key)) continue; // re-pasting a list must not duplicate it
+    seen.add(key);
+    rules.push(rule);
+    added++;
+  }
+  if (!added) throw new Error('همه‌ی این دامنه‌ها از قبل اضافه شده بودند');
+  writeRules(rules);
+}));
+
+// ---- Smart server selection ----
+
+async function rankByTcp(profiles, limit = 8) {
+  const results = new Array(profiles.length);
+  let cursor = 0;
+  const runner = async () => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= profiles.length) return;
+      const p = profiles[i];
+      try {
+        const r = await serverTest.tcpPingStats(p.address, p.port, { count: 2, timeoutMs: 1500, gapMs: 60 });
+        results[i] = { profile: p, score: tcpOnlyScore({ latency: r.avg, loss: r.loss }), avg: r.avg };
+      } catch {
+        results[i] = null;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, profiles.length) }, runner));
+  return results.filter((r) => r && r.score != null).sort((a, b) => b.score - a.score);
+}
+
+// "Automatically Select Best Server" for the user's own configs. The pool has
+// its own, deeper selection (soulPool.selectBest) because it can afford to
+// tunnel-test unknown servers; here the list is the user's, usually small, and
+// a quick quality-weighted probe is the right trade between accuracy and the
+// wait before the connect button does something.
+ipcMain.handle('connection:connectBest', async () => {
+  cancelSoulSelection();
+  const profiles = store.get('profiles', []);
+  if (!profiles.length) throw new Error('کانفیگی برای انتخاب وجود ندارد');
+  if (profiles.length === 1) {
+    await serialize(() => connect(profiles[0].id));
+    return { connectionState, profile: briefProfile(profiles[0]) };
+  }
+
+  // The probe sweep takes a couple of seconds; show it as "connecting" for
+  // that whole time rather than leaving the button idle and unresponsive.
+  connectionState = 'connecting';
+  sendState();
+  let ranked = [];
+  try {
+    ranked = await rankByTcp(profiles.slice(0, MAX_FAILOVER_CANDIDATES));
+    if (!ranked.length) throw new Error('هیچ سروری پاسخ نداد. اتصال اینترنت خود را بررسی کنید.');
+  } catch (err) {
+    // connect() owns the state from here on; every path that fails before it
+    // has to put the UI back to idle itself.
+    if (connectionState === 'connecting') {
+      connectionState = 'disconnected';
+      sendState();
+    }
+    throw err;
+  }
+
+  await serialize(() => connect(ranked[0].profile.id));
+  return { connectionState, profile: briefProfile(ranked[0].profile), score: ranked[0].score };
+});
+
+ipcMain.handle('health:get', () => ({
+  active: healthMonitor.activeHealth(),
+  backup: healthMonitor.backupSnapshot(),
+  failover: failover.snapshot(),
+}));

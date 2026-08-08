@@ -6,6 +6,8 @@ import StatusBar from './components/StatusBar.jsx';
 import SettingsView from './components/SettingsView.jsx';
 import ServerFinder from './components/ServerFinder.jsx';
 import SoulPoolEntry from './components/SoulPoolEntry.jsx';
+import RoutingRules from './components/RoutingRules.jsx';
+import { FailoverStatus } from './components/FailoverSettings.jsx';
 import Icon from './components/Icon.jsx';
 import { loadSession, saveSession, clearSession } from './utils/sessionState.js';
 
@@ -149,6 +151,15 @@ export default function App() {
   const [windowMaximized, setWindowMaximized] = useState(false);
   const [systemProxyEnabled, setSystemProxyEnabled] = useState(false);
   const [killSwitchBlocking, setKillSwitchBlocking] = useState(false);
+  // Smart Routing / health / failover. `routingNeedsReconnect` is sticky until
+  // the next connect: a domain-rule change only reaches xray when the tunnel is
+  // rebuilt, and the user has to be told rather than left wondering why the
+  // rule they just wrote isn't doing anything yet.
+  const [routing, setRouting] = useState(null);
+  const [routingNeedsReconnect, setRoutingNeedsReconnect] = useState(false);
+  const [health, setHealth] = useState(null);
+  const [failover, setFailover] = useState(null);
+  const [failoverEvent, setFailoverEvent] = useState(null);
 
   useEffect(() => {
     window.soul.windowIsMaximized?.().then(setWindowMaximized).catch(() => {});
@@ -170,6 +181,9 @@ export default function App() {
     setSoulMode(!!data.soulModeEnabled);
     setSoulCount(data.soulCount || 0);
     setActiveSoulProfile(data.activeSoulProfile || null);
+    if (data.routing) setRouting(data.routing);
+    if (data.health) setHealth(data.health);
+    if (data.failover) setFailover(data.failover);
   }, []);
 
   // Warm the pool list in the background on first paint so the sidebar can
@@ -248,9 +262,14 @@ export default function App() {
       setKillSwitchBlocking(!!killSwitchBlocking);
       setSoulMode(!!soulModeEnabled);
       setActiveSoulProfile(activeSoulProfile || null);
-      if (connectionState !== 'connected') {
+      if (connectionState === 'connected') {
+        // A fresh tunnel was built from the current rules, so whatever was
+        // pending has now been applied.
+        setRoutingNeedsReconnect(false);
+      } else {
         setLatencyMs(null);
         setTraffic(null);
+        setHealth(null);
         refresh(); // picks up the just-persisted lifetime usage total
       }
     });
@@ -259,6 +278,23 @@ export default function App() {
       // 'done' leaves the winning server on screen; a cancel (error with no
       // message) just clears the row back to its idle state.
       if (p.phase === 'error' && !p.message) setSoulProgress(null);
+    });
+    const offRouting = window.soul.onRoutingChanged?.((state) => {
+      setRouting(state);
+      if (state.needsReconnect) setRoutingNeedsReconnect(true);
+    });
+    const offHealth = window.soul.onHealthUpdate?.((patch) => {
+      setHealth((prev) => ({ ...prev, ...patch }));
+    });
+    const offFailover = window.soul.onFailoverEvent?.((e) => {
+      // 'degrading' is the engine counting bad checks -- useful telemetry, but
+      // not something to interrupt the user with until it actually acts.
+      if (e.phase === 'degrading') return;
+      if (e.phase === 'blocked') return;
+      setFailoverEvent(e);
+      if (e.phase === 'done' || e.phase === 'failed') {
+        window.soul.getHealth?.().then((h) => h && setFailover(h.failover)).catch(() => {});
+      }
     });
     const offLatency = window.soul.onLatencyUpdate(({ ms }) => setLatencyMs(ms));
     const offTraffic = window.soul.onTrafficUpdate((data) => setTraffic(data));
@@ -280,8 +316,19 @@ export default function App() {
     return () => {
       offState(); offLatency(); offTraffic(); offProfiles(); offOpenSettings(); offUpdater();
       if (offSoul) offSoul();
+      if (offRouting) offRouting();
+      if (offHealth) offHealth();
+      if (offFailover) offFailover();
     };
   }, [refresh]);
+
+  // A completed switch has told its story after a while; a failed one stays
+  // until dismissed, because it means the user is probably still offline.
+  useEffect(() => {
+    if (failoverEvent?.phase !== 'done') return;
+    const t = setTimeout(() => setFailoverEvent(null), 20000);
+    return () => clearTimeout(t);
+  }, [failoverEvent]);
 
   // "Restore Previous Session": persist the active tab whenever it changes,
   // but only while the setting is on -- and wipe any stored session the
@@ -330,6 +377,11 @@ export default function App() {
         // The pool picks the server; this is the whole point of the mode.
         setSoulProgress({ phase: 'fetching' });
         await window.soul.soulConnectBest();
+      } else if (settings?.autoSelectBestServer && profiles.length > 1) {
+        // "Let it choose" is exactly what the toggle asks for. Clicking a
+        // specific server in the sidebar still connects to that one.
+        const r = await window.soul.connectBest();
+        if (r?.profile) showToast(`بهترین سرور انتخاب شد: ${r.profile.name}`);
       } else {
         if (!activeProfileId) {
           showToast('اول یک کانفیگ را انتخاب کن');
@@ -343,7 +395,84 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [busy, connectionState, activeProfileId, soulMode, showToast]);
+  }, [busy, connectionState, activeProfileId, soulMode, settings, profiles.length, showToast]);
+
+  // ---- Smart Routing ----
+  //
+  // Every mutation answers with the whole routing state, so the UI never has to
+  // guess what the main process did with the rule it just sent (normalization
+  // rewrites exe paths and domain forms) -- it just renders what came back.
+  const applyRouting = useCallback((state) => {
+    if (!state) return;
+    setRouting(state);
+    if (state.needsReconnect) setRoutingNeedsReconnect(true);
+  }, []);
+
+  const handleSetRoutingMode = useCallback(async (mode) => {
+    try {
+      applyRouting(await window.soul.routingSetMode(mode));
+    } catch (err) {
+      showToast(err.message || 'خطا در تغییر حالت مسیریابی', 'error');
+    }
+  }, [applyRouting, showToast]);
+
+  const handleSetLanDirect = useCallback(async (enabled) => {
+    try {
+      applyRouting(await window.soul.routingSetLanDirect(enabled));
+    } catch (err) {
+      showToast(err.message || 'خطا در ذخیره', 'error');
+    }
+  }, [applyRouting, showToast]);
+
+  // Rethrows: the rule modal keeps itself open and shows the validation error
+  // inline instead of closing over a change that never happened.
+  const handleSaveRule = useCallback(async (rule) => {
+    try {
+      applyRouting(await window.soul.routingSaveRule(rule));
+    } catch (err) {
+      showToast(err.message || 'قانون ذخیره نشد', 'error');
+      throw err;
+    }
+  }, [applyRouting, showToast]);
+
+  const handleDeleteRule = useCallback(async (id) => {
+    try {
+      applyRouting(await window.soul.routingDeleteRule(id));
+    } catch (err) {
+      showToast(err.message || 'حذف نشد', 'error');
+    }
+  }, [applyRouting, showToast]);
+
+  const handleToggleRule = useCallback(async (id, enabled) => {
+    try {
+      applyRouting(await window.soul.routingToggleRule(id, enabled));
+    } catch (err) {
+      showToast(err.message || 'خطا', 'error');
+    }
+  }, [applyRouting, showToast]);
+
+  const handleAddDomains = useCallback(async (payload) => {
+    try {
+      applyRouting(await window.soul.routingAddDomains(payload));
+      showToast('دامنه‌ها اضافه شدند');
+    } catch (err) {
+      showToast(err.message || 'افزوده نشد', 'error');
+      throw err;
+    }
+  }, [applyRouting, showToast]);
+
+  const handleReconnect = useCallback(async () => {
+    if (busy || !activeProfileId) return;
+    setBusy(true);
+    try {
+      await window.soul.connect(activeProfileId);
+      setRoutingNeedsReconnect(false);
+    } catch (err) {
+      showToast(err.message || 'خطا در اتصال مجدد', 'error');
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, activeProfileId, showToast]);
 
   // Selecting the pool row. Toggling it off falls back to manual selection;
   // doing either mid-sweep cancels the sweep rather than queueing behind it.
@@ -735,14 +864,25 @@ export default function App() {
 
         <main className="main">
           <header className="main-head">
-            <span className="main-title">{tab === 'settings' ? 'تنظیمات' : 'کنترل اتصال'}</span>
-            <button
-              className="icon-btn ghost"
-              onClick={() => setTab(tab === 'settings' ? 'servers' : 'settings')}
-              title={tab === 'settings' ? 'بازگشت به کنترل اتصال' : 'تنظیمات'}
-            >
-              <Icon name={tab === 'settings' ? 'close' : 'settings'} size={16} />
-            </button>
+            <span className="main-title">
+              {tab === 'settings' ? 'تنظیمات' : tab === 'routing' ? 'قوانین مسیریابی' : 'کنترل اتصال'}
+            </span>
+            <div className="main-head-actions">
+              <button
+                className={`icon-btn ghost ${tab === 'routing' ? 'active' : ''}`}
+                onClick={() => setTab(tab === 'routing' ? 'servers' : 'routing')}
+                title={tab === 'routing' ? 'بازگشت به کنترل اتصال' : 'قوانین مسیریابی'}
+              >
+                <Icon name={tab === 'routing' ? 'close' : 'filter'} size={16} />
+              </button>
+              <button
+                className={`icon-btn ghost ${tab === 'settings' ? 'active' : ''}`}
+                onClick={() => setTab(tab === 'settings' ? 'servers' : 'settings')}
+                title={tab === 'settings' ? 'بازگشت به کنترل اتصال' : 'تنظیمات'}
+              >
+                <Icon name={tab === 'settings' ? 'close' : 'settings'} size={16} />
+              </button>
+            </div>
           </header>
 
           {tab === 'servers' ? (
@@ -753,6 +893,21 @@ export default function App() {
               onToggle={handleToggleConnect}
               onSetMode={handleSetMode}
             />
+          ) : tab === 'routing' ? (
+            <div className="settings-pane">
+              <RoutingRules
+                routing={routing}
+                connectionState={connectionState}
+                needsReconnect={routingNeedsReconnect}
+                onSetMode={handleSetRoutingMode}
+                onSetLanDirect={handleSetLanDirect}
+                onSaveRule={handleSaveRule}
+                onDeleteRule={handleDeleteRule}
+                onToggleRule={handleToggleRule}
+                onAddDomains={handleAddDomains}
+                onReconnect={handleReconnect}
+              />
+            </div>
           ) : (
             <div className="settings-pane">
               {settings && (
@@ -778,9 +933,15 @@ export default function App() {
                   onOpenProxyFolder={handleOpenProxyFolder}
                   onResetNetworkDefaults={handleResetNetworkDefaults}
                   killSwitchBlocking={killSwitchBlocking}
+                  health={health}
+                  failover={failover}
                 />
               )}
             </div>
+          )}
+
+          {failoverEvent && (
+            <FailoverStatus event={failoverEvent} onDismiss={() => setFailoverEvent(null)} />
           )}
 
           {killSwitchBlocking && (

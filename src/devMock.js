@@ -42,7 +42,45 @@ const DEFAULT_SETTINGS = {
   httpUsername: '',
   httpPassword: '',
   customBypass: '',
+  routingMode: 'smart',
+  lanDirect: true,
+  autoSelectBestServer: false,
+  failoverEnabled: true,
+  failoverMode: 'balanced',
+  backupMonitoring: true,
 };
+
+// Mirrors electron/lib/routing/rules.cjs closely enough for the UI to behave
+// realistically in the browser -- the real normalization (and the matching it
+// feeds) lives in the main process and is never bundled here.
+function mockNormalizeRule(input, existing) {
+  const raw = String(input.exe || '').trim().replace(/^"+|"+$/g, '').replace(/\\/g, '/');
+  const base = raw.slice(raw.lastIndexOf('/') + 1).toLowerCase();
+  const exe = base ? (/\.[a-z0-9]{1,8}$/.test(base) ? base : `${base}.exe`) : '';
+  let d = String(input.domain || '').trim().toLowerCase().replace(/^[a-z0-9+.-]+:\/\//, '').replace(/[/?#].*$/, '');
+  if (d === '*' || d === 'all' || d === 'any') d = '';
+  let domainKind = 'any';
+  let domainValue = '';
+  if (d.startsWith('*.') || d.startsWith('.')) {
+    domainKind = 'suffix';
+    domainValue = d.replace(/^\*?\.+/, '');
+  } else if (d) {
+    domainKind = 'exact';
+    domainValue = d;
+  }
+  if (!exe && domainKind === 'any') throw new Error('هر قانون باید حداقل یک برنامه یا یک دامنه داشته باشد');
+  return {
+    id: existing?.id || input.id || `r${Math.random().toString(36).slice(2, 9)}`,
+    enabled: input.enabled === undefined ? (existing ? existing.enabled : true) : !!input.enabled,
+    appName: (input.appName || '').trim() || (exe ? exe.replace(/\.exe$/, '') : domainValue),
+    exe,
+    domain: domainKind === 'any' ? '' : (domainKind === 'suffix' ? `*.${domainValue}` : domainValue),
+    domainKind,
+    domainValue,
+    route: input.route === 'direct' ? 'direct' : 'proxy',
+    createdAt: existing?.createdAt || Date.now(),
+  };
+}
 
 export function installDevMock() {
   let settings = { ...DEFAULT_SETTINGS };
@@ -55,7 +93,33 @@ export function installDevMock() {
     killSwitchBlocking: false,
   };
   let killSwitchArmed = false;
-  const listeners = { state: [], latency: [], traffic: [], profiles: [], settings: [], updater: [], test: [], proxyLog: [], soul: [] };
+  const listeners = { state: [], latency: [], traffic: [], profiles: [], settings: [], updater: [], test: [], proxyLog: [], soul: [], routing: [], health: [], failover: [] };
+
+  // Smart Routing / health / failover, mocked well enough to drive the whole
+  // screen: rules round-trip through the same normalization shape the main
+  // process applies, and the health numbers drift so the readout is alive.
+  let routingRules = [
+    mockNormalizeRule({ appName: 'Chrome', exe: 'chrome.exe', route: 'proxy' }),
+    mockNormalizeRule({ appName: 'Steam', exe: 'steam.exe', route: 'direct' }),
+    mockNormalizeRule({ appName: 'Chrome', exe: 'chrome.exe', domain: 'example.com', route: 'direct' }),
+    mockNormalizeRule({ appName: 'سایت‌های ایرانی', domain: '*.ir', route: 'direct' }),
+  ];
+  let healthTimer = null;
+  let health = { active: { latency: null, jitter: null, loss: null, score: null, total: 0, samples: [] }, backup: [] };
+  const failoverState = { mode: 'balanced', lastEvent: null };
+  const emitRouting = (extra) => listeners.routing.forEach((fn) => fn({ ...routingState(), ...extra }));
+  const emitHealth = (patch) => listeners.health.forEach((fn) => fn(patch));
+
+  function routingState() {
+    return {
+      mode: settings.routingMode,
+      lanDirect: settings.lanDirect,
+      rules: routingRules,
+      dispatcherActive: settings.routingMode === 'smart' && routingRules.some((r) => r.enabled && r.exe) && state.connectionState === 'connected',
+      dispatcherNeeded: settings.routingMode === 'smart' && routingRules.some((r) => r.enabled && r.exe),
+      stats: null,
+    };
+  }
   // Soul Connection pool, mocked: enough to drive the sidebar row through
   // fetch -> probe -> tunnel-test -> connect without a backend.
   let soulModeEnabled = false;
@@ -147,6 +211,34 @@ export function installDevMock() {
     clearInterval(trafficTimer);
     clearInterval(latencyTimer);
     clearInterval(proxyLogTimer);
+    clearInterval(healthTimer);
+    healthTimer = null;
+    health = { active: { latency: null, jitter: null, loss: null, score: null, total: 0, samples: [] }, backup: [] };
+  }
+
+  function startHealth() {
+    clearInterval(healthTimer);
+    const samples = [];
+    healthTimer = setInterval(() => {
+      samples.push(Math.round(rnd(70, 210)));
+      if (samples.length > 12) samples.shift();
+      const latency = Math.round(samples.reduce((a, b) => a + b, 0) / samples.length);
+      const jitter = samples.length > 1 ? Math.round(rnd(4, 40)) : 0;
+      const loss = Math.random() < 0.85 ? 0 : Math.round(rnd(1, 9));
+      const score = Math.max(0, Math.min(100, Math.round(100 - latency / 12 - jitter / 4 - loss * 4)));
+      health = {
+        active: { latency, jitter, loss, score, total: samples.length, alive: samples.length, consecutiveFails: 0, samples: [...samples] },
+        backup: profiles.slice(0, 4).map((p, i) => ({
+          id: p.id, name: p.name,
+          score: Math.max(10, Math.round(rnd(35, 92) - i * 4)),
+          measured: i < 2 ? 'tunnel' : 'tcp',
+          latency: Math.round(rnd(60, 320)),
+          loss: 0,
+          at: Date.now(),
+        })),
+      };
+      emitHealth(health);
+    }, 3000);
   }
 
   window.soul = {
@@ -157,7 +249,114 @@ export function installDevMock() {
       soulModeEnabled,
       soulCount: SOUL_COUNT,
       activeSoulProfile,
+      routing: routingState(),
+      health,
+      failover: failoverState,
     }),
+
+    // ---- Smart Routing ----
+    routingGet: async () => routingState(),
+    routingSetMode: async (mode) => {
+      settings = { ...settings, routingMode: mode };
+      const s = { ...routingState(), needsReconnect: state.connectionState === 'connected' };
+      emitRouting({ needsReconnect: s.needsReconnect });
+      return s;
+    },
+    routingSetLanDirect: async (enabled) => {
+      settings = { ...settings, lanDirect: !!enabled };
+      const s = { ...routingState(), needsReconnect: state.connectionState === 'connected' };
+      emitRouting({ needsReconnect: s.needsReconnect });
+      return s;
+    },
+    routingSaveRule: async (rule) => {
+      const idx = rule.id ? routingRules.findIndex((r) => r.id === rule.id) : -1;
+      const next = mockNormalizeRule(rule, idx >= 0 ? routingRules[idx] : null);
+      routingRules = idx >= 0
+        ? routingRules.map((r, i) => (i === idx ? next : r))
+        : routingRules.concat(next);
+      // Only a destination rule changes what xray itself runs; app rules are
+      // applied live by the dispatcher.
+      const needsReconnect = state.connectionState === 'connected' && next.domainKind !== 'any';
+      emitRouting({ needsReconnect });
+      return { ...routingState(), needsReconnect };
+    },
+    routingDeleteRule: async (id) => {
+      routingRules = routingRules.filter((r) => r.id !== id);
+      emitRouting({});
+      return routingState();
+    },
+    routingToggleRule: async (id, enabled) => {
+      routingRules = routingRules.map((r) => (r.id === id ? { ...r, enabled: !!enabled } : r));
+      emitRouting({});
+      return routingState();
+    },
+    routingAddDomains: async ({ domains, route }) => {
+      const parts = String(domains || '').split(/[\s,;]+/).map((d) => d.trim()).filter(Boolean);
+      if (!parts.length) throw new Error('هیچ دامنه‌ای وارد نشده است');
+      const seen = new Set(routingRules.map((r) => `${r.exe}|${r.domain}`));
+      const added = [];
+      for (const domain of parts) {
+        const rule = mockNormalizeRule({ domain, route });
+        const key = `${rule.exe}|${rule.domain}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        added.push(rule);
+      }
+      if (!added.length) throw new Error('همه‌ی این دامنه‌ها از قبل اضافه شده بودند');
+      routingRules = routingRules.concat(added);
+      const needsReconnect = state.connectionState === 'connected';
+      emitRouting({ needsReconnect });
+      return { ...routingState(), needsReconnect };
+    },
+    onRoutingChanged: on('routing'),
+    // Stands in for the PowerShell enumeration, including its ~2s cost, so the
+    // loading state is actually visible while developing in a browser.
+    listApps: async () => {
+      await new Promise((r) => setTimeout(r, 700));
+      return {
+        source: 'powershell',
+        apps: [
+          { exe: 'chrome.exe', name: 'Google Chrome', windowed: true, instances: 14, memoryMb: 1820 },
+          { exe: 'msedge.exe', name: 'Microsoft Edge', windowed: true, instances: 8, memoryMb: 910 },
+          { exe: 'code.exe', name: 'Visual Studio Code', windowed: true, instances: 11, memoryMb: 1532 },
+          { exe: 'telegram.exe', name: 'Telegram Desktop', windowed: true, instances: 1, memoryMb: 419 },
+          { exe: 'discord.exe', name: 'Discord', windowed: true, instances: 5, memoryMb: 604 },
+          { exe: 'steam.exe', name: 'Steam', windowed: true, instances: 3, memoryMb: 388 },
+          { exe: 'explorer.exe', name: 'Windows Explorer', windowed: true, instances: 1, memoryMb: 357 },
+          { exe: 'spotify.exe', name: 'Spotify', windowed: true, instances: 4, memoryMb: 275 },
+          { exe: 'onedrive.exe', name: 'Microsoft OneDrive', windowed: false, instances: 1, memoryMb: 96 },
+          { exe: 'nvcontainer.exe', name: 'NVIDIA Container', windowed: false, instances: 3, memoryMb: 64 },
+          { exe: 'steamwebhelper.exe', name: 'Steam Web Helper', windowed: false, instances: 6, memoryMb: 412 },
+        ],
+      };
+    },
+
+    // ---- health & failover ----
+    getHealth: async () => ({ ...health, failover: failoverState }),
+    onHealthUpdate: on('health'),
+    onFailoverEvent: on('failover'),
+    connectBest: async () => {
+      state = { ...state, connectionState: 'connecting' };
+      emitState();
+      await new Promise((r) => setTimeout(r, 1200));
+      const winner = profiles[0];
+      state = { ...state, activeProfileId: winner.id, connectionState: 'connected', connectedAt: Date.now() };
+      emitState();
+      startTelemetry();
+      startHealth();
+      return { connectionState: state.connectionState, profile: { id: winner.id, name: winner.name }, score: 78 };
+    },
+    // Dev-only trigger so the failover card can be seen without waiting for a
+    // real connection to degrade: window.soul.__mockFailover().
+    __mockFailover: async () => {
+      const from = profiles[0];
+      const to = profiles[2];
+      const emit = (p) => listeners.failover.forEach((fn) => fn(p));
+      emit({ phase: 'switching', reason: 'loss', reasonText: 'پکت‌لاس بالا', from, to });
+      await new Promise((r) => setTimeout(r, 1600));
+      failoverState.lastEvent = { at: Date.now(), ok: true, reason: 'loss', reasonText: 'پکت‌لاس بالا', from, to };
+      emit({ phase: 'done', ...failoverState.lastEvent });
+    },
     getAppInfo: async () => ({ version: '2.0.0-dev', xrayVersion: '25.1.30' }),
     connect: async (id) => {
       state = { ...state, activeProfileId: id, connectionState: 'connecting' };
@@ -170,6 +369,7 @@ export function installDevMock() {
       }
       emitState();
       startTelemetry();
+      startHealth();
     },
     disconnect: async () => {
       state = { ...state, connectionState: 'disconnecting' };

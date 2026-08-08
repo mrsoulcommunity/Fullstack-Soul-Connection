@@ -100,6 +100,35 @@ contextBridge.exposeInMainWorld('soul', {
     return () => ipcRenderer.removeListener('updater-status', handler);
   },
 
+  // ---- Smart Routing ----
+  routingGet: () => ipcRenderer.invoke('routing:get'),
+  routingSetMode: (mode) => ipcRenderer.invoke('routing:setMode', mode),
+  routingSetLanDirect: (enabled) => ipcRenderer.invoke('routing:setLanDirect', enabled),
+  routingSaveRule: (rule) => ipcRenderer.invoke('routing:saveRule', rule),
+  routingDeleteRule: (id) => ipcRenderer.invoke('routing:deleteRule', id),
+  routingToggleRule: (id, enabled) => ipcRenderer.invoke('routing:toggleRule', { id, enabled }),
+  routingAddDomains: (payload) => ipcRenderer.invoke('routing:addDomains', payload),
+  listApps: (force) => ipcRenderer.invoke('apps:list', { force: !!force }),
+  onRoutingChanged: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('routing-changed', handler);
+    return () => ipcRenderer.removeListener('routing-changed', handler);
+  },
+
+  // ---- Health, smart selection & failover ----
+  getHealth: () => ipcRenderer.invoke('health:get'),
+  connectBest: () => ipcRenderer.invoke('connection:connectBest'),
+  onHealthUpdate: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('health-update', handler);
+    return () => ipcRenderer.removeListener('health-update', handler);
+  },
+  onFailoverEvent: (callback) => {
+    const handler = (_e, payload) => callback(payload);
+    ipcRenderer.on('failover-event', handler);
+    return () => ipcRenderer.removeListener('failover-event', handler);
+  },
+
   soulList: (force) => ipcRenderer.invoke('soul:list', { force: !!force }),
   soulSetEnabled: (enabled) => ipcRenderer.invoke('soul:setEnabled', enabled),
   soulConnectBest: () => ipcRenderer.invoke('soul:connectBest'),
